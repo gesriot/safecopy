@@ -288,6 +288,7 @@ fn copy_entries(
             &entry.source_abs,
             &dest_abs,
             opts.max_retries,
+            opts.unlimited_retries,
             bar,
             reporter,
         ) {
@@ -395,10 +396,18 @@ fn scan_source(source: &Path) -> anyhow::Result<Vec<FileEntry>> {
 }
 
 /// Копирует один файл с retry; возвращает финальный xxh3 хеш.
+///
+/// В режиме `unlimited_retries` для transient-ошибок записи/верификации повторяет
+/// попытки без ограничений: каждая новая попытка пишет в **новый** `.tmp.<N>`, а
+/// предыдущие неудачные `.tmp` не удаляются — они держат свои кластеры занятыми,
+/// так что FS вынуждена отдавать следующей попытке другие сектора карты.
+/// Остановка — только по `PersistentDevice` (disk full / permission denied) или
+/// по истощению `max_retries` для `PersistentFile` (нечитаемый source).
 fn copy_one(
     source: &Path,
     dest: &Path,
     max_retries: u32,
+    unlimited_retries: bool,
     bar: &ProgressBar,
     reporter: &dyn ProgressReporter,
 ) -> Result<Hash> {
@@ -406,70 +415,89 @@ fn copy_one(
         fs::create_dir_all(parent)?;
     }
 
-    let tmp = tmp_path_for(dest);
+    let mut kept_tmps: Vec<PathBuf> = Vec::new();
+    let mut attempt: u32 = 0;
 
-    let mut last_err: Option<CopyError> = None;
-    for attempt in 1..=max_retries {
-        // Если предыдущая попытка оставила .tmp — удаляем.
+    loop {
+        attempt += 1;
+        let tmp = tmp_path_for(dest, attempt);
+        // На всякий случай: если .tmp.<N> висит от прошлой прерванной сессии — снести.
         let _ = fs::remove_file(&tmp);
 
-        let (source_hash, size) = match attempt_copy_and_verify(source, &tmp) {
-            Ok(result) => result,
-            Err(e) => {
-                let class = e.classify();
-                if attempt < max_retries && !matches!(class, ErrorClass::PersistentDevice) {
+        match attempt_copy_and_verify(source, &tmp) {
+            Ok((source_hash, size)) => {
+                if let Err(e) = timestamps::copy_times(source, &tmp) {
+                    // Timestamps — best-effort: не откатываем копию из-за них.
+                    eprintln!("  ⚠ не удалось скопировать времена для {}: {e}", dest.display());
                     report_log(
                         reporter,
-                        LogLevel::Retry,
+                        LogLevel::Warning,
                         format!(
-                            "[RETRY] {}: попытка {attempt}/{max_retries} не прошла: {e}",
+                            "[WARN] Не удалось скопировать времена для {}: {e}",
                             dest.display()
                         ),
                     );
                 }
-                last_err = Some(e);
+                fs::rename(&tmp, dest).map_err(|e| CopyError::DestinationWrite {
+                    path: dest.to_path_buf(),
+                    source: e,
+                })?;
+                cleanup_failed_tmps(&kept_tmps);
+                bar.inc(size);
+                reporter.report(ProgressEvent::BytesAdvanced(size));
+                return Ok(source_hash);
+            }
+            Err(e) => {
+                let class = e.classify();
+
                 if matches!(class, ErrorClass::PersistentDevice) {
+                    let _ = fs::remove_file(&tmp);
+                    cleanup_failed_tmps(&kept_tmps);
+                    return Err(e);
+                }
+
+                // Transient: unlimited или до max_retries.
+                // PersistentFile: всегда до max_retries (больше попыток source не починит).
+                let transient = matches!(class, ErrorClass::Transient);
+                let more_allowed = if transient {
+                    unlimited_retries || attempt < max_retries
+                } else {
+                    attempt < max_retries
+                };
+
+                if !more_allowed {
+                    let _ = fs::remove_file(&tmp);
+                    cleanup_failed_tmps(&kept_tmps);
                     break;
                 }
-                if attempt < max_retries {
-                    thread::sleep(backoff(attempt));
+
+                let retry_label = if transient && unlimited_retries {
+                    format!("попытка {attempt} (unlimited)")
+                } else {
+                    format!("попытка {attempt}/{max_retries}")
+                };
+                report_log(
+                    reporter,
+                    LogLevel::Retry,
+                    format!("[RETRY] {}: {retry_label} не прошла: {e}", dest.display()),
+                );
+
+                // В unlimited-режиме удерживаем неудачный .tmp — пусть сектор останется занятым,
+                // и FS на следующей попытке выберет другие кластеры.
+                if transient && unlimited_retries {
+                    kept_tmps.push(tmp);
+                } else {
+                    let _ = fs::remove_file(&tmp);
                 }
-                continue;
+
+                thread::sleep(backoff(attempt));
             }
-        };
-
-        // Успех: устанавливаем timestamps и делаем атомарный rename.
-        if let Err(e) = timestamps::copy_times(source, &tmp) {
-            // Timestamps — best-effort: не откатываем копию из-за них.
-            eprintln!("  ⚠ не удалось скопировать времена для {}: {e}", dest.display());
-            report_log(
-                reporter,
-                LogLevel::Warning,
-                format!(
-                    "[WARN] Не удалось скопировать времена для {}: {e}",
-                    dest.display()
-                ),
-            );
-        }
-        fs::rename(&tmp, dest).map_err(|e| CopyError::DestinationWrite {
-            path: dest.to_path_buf(),
-            source: e,
-        })?;
-
-        bar.inc(size);
-        reporter.report(ProgressEvent::BytesAdvanced(size));
-        return Ok(source_hash);
-    }
-
-    let _ = fs::remove_file(&tmp);
-    if let Some(e) = last_err {
-        if matches!(e.classify(), ErrorClass::PersistentDevice) {
-            return Err(e);
         }
     }
+
     Err(CopyError::RetriesExhausted {
         path: dest.to_path_buf(),
-        attempts: max_retries,
+        attempts: attempt,
     })
 }
 
@@ -659,10 +687,36 @@ fn cold_read_hash(path: &Path) -> Result<Hash> {
     })
 }
 
-fn tmp_path_for(dest: &Path) -> PathBuf {
+fn tmp_path_for(dest: &Path, attempt: u32) -> PathBuf {
     let mut s = dest.as_os_str().to_os_string();
     s.push(TMP_SUFFIX);
+    s.push(format!(".{attempt}"));
     PathBuf::from(s)
+}
+
+/// Проверяет, является ли имя файла временным файлом `SafeCopy`.
+/// Ловит и legacy-формат (`<name>.safecopy.tmp`), и attempt-numbered
+/// (`<name>.safecopy.tmp.<N>`), чтобы `cleanup_stale_tmp` подметал оба.
+fn is_safecopy_tmp_name(name: &str) -> bool {
+    if name.ends_with(TMP_SUFFIX) {
+        return true;
+    }
+    let Some(dot) = name.rfind('.') else {
+        return false;
+    };
+    let (prefix, num_with_dot) = name.split_at(dot);
+    let num = &num_with_dot[1..];
+    prefix.ends_with(TMP_SUFFIX)
+        && !num.is_empty()
+        && num.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Чистит удержанные неудачные .tmp файлы. Ошибки игнорируем —
+/// файл мог быть уже вытеснен, заблокирован или отсутствовать.
+fn cleanup_failed_tmps(tmps: &[PathBuf]) {
+    for p in tmps {
+        let _ = fs::remove_file(p);
+    }
 }
 
 fn backoff(attempt: u32) -> Duration {
@@ -740,11 +794,7 @@ fn final_reread(
 fn cleanup_stale_tmp(dir: &Path) {
     for entry in WalkDir::new(dir).follow_links(false) {
         let Ok(e) = entry else { continue };
-        if e.file_type().is_file()
-            && e.file_name()
-                .to_string_lossy()
-                .ends_with(TMP_SUFFIX)
-        {
+        if e.file_type().is_file() && is_safecopy_tmp_name(&e.file_name().to_string_lossy()) {
             let _ = fs::remove_file(e.path());
         }
     }
@@ -812,6 +862,7 @@ mod tests {
             cooldown_secs: 0,
             no_manifest_on_card: false,
             max_retries: 3,
+            unlimited_retries: false,
         };
         super::run(&opts).expect("initial copy");
 

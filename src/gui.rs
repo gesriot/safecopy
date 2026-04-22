@@ -68,6 +68,7 @@ pub struct SafeCopyApp {
     dest_dir: Option<PathBuf>,
     cooldown_secs: u64,
     max_retries: u32,
+    unlimited_retries: bool,
     no_manifest_on_card: bool,
     current_file: String,
     total_bytes: u64,
@@ -84,6 +85,7 @@ impl Default for SafeCopyApp {
             dest_dir: None,
             cooldown_secs: 45,
             max_retries: 3,
+            unlimited_retries: false,
             no_manifest_on_card: false,
             current_file: String::new(),
             total_bytes: 0,
@@ -204,7 +206,14 @@ impl SafeCopyApp {
             .default_open(false)
             .show(ui, |ui| {
                 ui.add(egui::Slider::new(&mut self.cooldown_secs, 0..=120).text("Cooldown, сек"));
-                ui.add(egui::Slider::new(&mut self.max_retries, 1..=10).text("Попытки на файл"));
+                ui.add_enabled(
+                    !self.unlimited_retries,
+                    egui::Slider::new(&mut self.max_retries, 1..=10).text("Попытки на файл"),
+                );
+                ui.checkbox(
+                    &mut self.unlimited_retries,
+                    "Копировать до победного (пока не получится или не кончится память)",
+                );
                 ui.checkbox(&mut self.no_manifest_on_card, "Без манифеста на карте");
             });
     }
@@ -291,6 +300,7 @@ impl SafeCopyApp {
             cooldown_secs: self.cooldown_secs,
             no_manifest_on_card: self.no_manifest_on_card,
             max_retries: self.max_retries,
+            unlimited_retries: self.unlimited_retries,
         };
         self.spawn_worker(ctx, move |reporter| {
             copy::run_with_reporter(&opts, reporter)
