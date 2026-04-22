@@ -147,7 +147,7 @@ Re-running `safecopy copy` on a destination that already contains a `manifest.xx
 - Anything else (missing, corrupted, changed source) is re-copied from scratch.
 - Stray `*.safecopy.tmp` files left over from the previous interrupted run are deleted before the main pass.
 
-The `.quarantine/` folder is left untouched — the user decides what to do with its contents.
+The `.quarantine/` folder is left untouched – the user decides what to do with its contents.
 
 ## What SafeCopy does *not* do
 
@@ -181,4 +181,4 @@ copy/
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT – see [LICENSE](LICENSE).
