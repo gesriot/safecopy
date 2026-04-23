@@ -12,10 +12,7 @@ For SD cards that assumption is wrong:
 - Bit-rot and stuck sectors are common, especially on cheap cards.
 - USB-bridge hiccups, Windows Indexer and antivirus intercept file I/O through kernel-level filter drivers; a buggy or misbehaving driver can in principle interfere with writes.
 - NAND controllers sometimes finish write-leveling *after* a file is "closed" – errors only surface on a genuine cold read minutes later.
-- After the copy, the OS page cache may hand you back good data from RAM while
-  the card actually has garbage. A normal re-read never notices.
-
-SafeCopy is built around these failure modes. Every file is written, flushed to hardware, re-read through a cache-bypass handle, hashed with XXH3-128, and compared against what was written. After the whole folder is done, the program cools down for 45 seconds (configurable) and does a second full cold re-read to catch delayed controller failures.
+- After the copy, the OS page cache may hand you back good data from RAM while the card actually has garbage. A normal re-read never notices.
 
 ## Features
 
@@ -24,13 +21,10 @@ SafeCopy is built around these failure modes. Every file is written, flushed to 
 - **Write-through writes** – `FILE_FLAG_WRITE_THROUGH` + `FlushFileBuffers` on Windows, `F_FULLFSYNC` on macOS. Data hits the device, not the page cache.
 - **Sector-aligned I/O buffer** – a custom aligned allocator on Windows so that `FILE_FLAG_NO_BUFFERING` reads actually succeed.
 - **Pre-flight sanity check** – writes and cold-reads a 10 MB pseudorandom probe before the real work starts. Bad reader / dead card fails fast.
-- **Safe-copy pipeline** – `.safecopy.tmp` → write → full_sync → close → cold-read verify → atomic rename → timestamp copy. The final filename never appears before the content is verified.
-- **2-stage in-file pipeline** – a reader thread hashes the source while a writer thread streams 1 MB blocks to the card through a bounded buffer pool.
-- **Cooldown + final re-read** – 45 s by default, then every file is cold-read again against the in-memory manifest. Delayed controller errors surface here rather than in the user's hands.
 - **`manifest.xxh3`** – written at the root of the card in `xxhsum -c` compatible format. The recipient can verify with `xxhsum -c manifest.xxh3` or with `safecopy verify`.
-- **Resume-safe** – if a previous run was interrupted, re-running `safecopy copy` reads the existing manifest, skips files whose source **and** cold-read stale `.safecopy.tmp` files.
+- **Resume-safe** – if a previous run was interrupted, re-running `safecopy copy` reads the existing manifest, skips files whose source **and** cold-read hashes match, and removes stale `.safecopy.tmp` files.
 - **Error classification** – `Transient` (retry with exponential backoff), `PersistentFile` (quarantine and continue), `PersistentDevice` (stop the whole run: disk full, permission denied, or too many consecutive failures).
-- **Unlimited retries** – optional mode (`--unlimited-retries` / GUI checkbox) that keeps retrying transient write/verify failures without a cap. Each failed attempt leaves its `.safecopy.tmp.<N>` on the card so the filesystem is forced to allocate different sectors on the next try. Stops only on `PersistentDevice` (disk full) or when all retries for source-unreadable files are exhausted.
+- **Unlimited retries** – optional mode (`--unlimited-retries` / GUI checkbox) that keeps retrying transient write/verify failures without a cap. Each failed attempt leaves its `.safecopy.tmp.<N>` on the card so the filesystem is forced to allocate different sectors on the next try.
 - **Quarantine folder** – files that can't be copied produce a JSON report in `.quarantine/` with timestamp, attempt count and reason. Run is not aborted.
 - **Timestamps preserved** – `mtime`, `atime`, and (on Windows) the creation time.
 - **Path-traversal safe** – the manifest reader rejects absolute paths, `..`, and Windows drive-letter prefixes so a hostile manifest cannot make `verify` read files outside the destination.
@@ -127,57 +121,12 @@ After the full folder is done:
 | `PersistentFile`   | All retries exhausted; source unreadable           | Quarantine the file, continue.            |
 | `PersistentDevice` | Disk full, permission denied, sanity-check failed, or 5 files in a row failed | Stop the whole run immediately.           |
 
-Quarantine files live in `<dest>/.quarantine/<mangled_name>.<ts>.failed.json`:
-
-```json
-{
-  "source_relative": "DCIM/IMG_0123.JPG",
-  "attempts": 3,
-  "unix_time": 1714000000,
-  "reason": "..."
-}
-```
-
-## Resume / idempotency
-
-Re-running `safecopy copy` on a destination that already contains a `manifest.xxh3` is safe:
-
-- The existing manifest is loaded into memory.
-- For each source file, if the manifest has a hash AND the destination file exists AND its cold-read hash matches AND the source hash matches, the file is skipped.
-- Anything else (missing, corrupted, changed source) is re-copied from scratch.
-- Stray `*.safecopy.tmp` files left over from the previous interrupted run are deleted before the main pass.
-
-The `.quarantine/` folder is left untouched – the user decides what to do with its contents.
-
 ## What SafeCopy does *not* do
 
 - No network copy, no deduplication, no compression, no encryption.
 - No block-device access – we stay on top of the filesystem.
 - No forced unmount / "safely remove" (requires admin on Windows).
 - No filesystem repair.
-
-## Project layout
-
-```
-copy/
-├── Cargo.toml
-├── Plan.md
-├── README.md
-└── src/
-    ├── main.rs          — CLI entry, routes to CLI subcommands or GUI
-    ├── cli.rs           — clap definitions
-    ├── gui.rs           — egui desktop UI
-    ├── progress.rs      — ProgressReporter trait + events
-    ├── error.rs         — CopyError / ErrorClass
-    ├── hash.rs          — XXH3-128 streaming + cold_hash_file helper
-    ├── io_flags.rs      — cross-platform cache-bypass / write-through / aligned IoBuf
-    ├── sanity.rs        — pre-flight probe
-    ├── copy.rs          — safe-copy pipeline, resume, quarantine dispatch
-    ├── verify.rs        — standalone verification pass
-    ├── manifest.rs      — xxhsum-compatible manifest read/write (+ traversal guard)
-    ├── quarantine.rs    — JSON failure reports
-    └── timestamps.rs    — mtime / atime / (Windows) creation time copy
-```
 
 ## License
 
