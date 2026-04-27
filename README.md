@@ -146,6 +146,23 @@ cargo test
 cargo build --release
 ```
 
+### macOS packaging
+
+Build the release binary first, then package it:
+
+```
+cargo build --release
+./scripts/package-macos.sh
+```
+
+The script creates:
+
+- `dist/SaveCopy.app`
+- `dist/SaveCopy.app.zip`
+- `dist/SaveCopy.dmg`
+
+It uses `macos/icon.PNG` as the source artwork, generates the rounded runtime icon used by egui in the Dock, writes the `.icns` bundle icon, and verifies the DMG with `hdiutil`.
+
 ## License
 
 MIT – see [LICENSE](LICENSE).
