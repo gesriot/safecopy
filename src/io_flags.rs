@@ -167,6 +167,7 @@ fn open_dest_write_impl(path: &Path) -> io::Result<File> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
+#[allow(clippy::unnecessary_wraps)]
 fn full_sync_platform(_file: &File) -> io::Result<()> {
     // На Linux sync_all() = fsync; более строгого аналога F_FULLFSYNC нет.
     Ok(())
