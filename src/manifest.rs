@@ -60,9 +60,9 @@ impl Manifest {
         let file = File::create(path)?;
         let mut w = BufWriter::new(file);
         for (rel, hash) in &self.entries {
-            let rel_str = rel.to_str().ok_or_else(|| {
-                CopyError::Manifest(format!("путь не UTF-8: {}", rel.display()))
-            })?;
+            let rel_str = rel
+                .to_str()
+                .ok_or_else(|| CopyError::Manifest(format!("путь не UTF-8: {}", rel.display())))?;
             // Формат xxhsum: <hash>  <path>\n  (два пробела)
             writeln!(w, "{hash}  {rel_str}")?;
         }
@@ -134,8 +134,14 @@ mod tests {
     #[test]
     fn roundtrip() {
         let mut m = Manifest::new();
-        m.insert(PathBuf::from("a/b.txt"), Hash::from_hex(&"ab".repeat(16)).unwrap());
-        m.insert(PathBuf::from("c.jpg"), Hash::from_hex(&"01".repeat(16)).unwrap());
+        m.insert(
+            PathBuf::from("a/b.txt"),
+            Hash::from_hex(&"ab".repeat(16)).unwrap(),
+        );
+        m.insert(
+            PathBuf::from("c.jpg"),
+            Hash::from_hex(&"01".repeat(16)).unwrap(),
+        );
 
         let path = temp_dir().join(format!("manifest-test-{}.xxh3", std::process::id()));
         m.write_to(&path).unwrap();

@@ -15,10 +15,7 @@ pub fn run(opts: &VerifyOpts) -> anyhow::Result<()> {
     run_with_reporter(opts, &NoopReporter)
 }
 
-pub fn run_with_reporter(
-    opts: &VerifyOpts,
-    reporter: &dyn ProgressReporter,
-) -> anyhow::Result<()> {
+pub fn run_with_reporter(opts: &VerifyOpts, reporter: &dyn ProgressReporter) -> anyhow::Result<()> {
     let target = load_verify_target(opts)?;
     announce_verify(&target, reporter);
 
@@ -186,11 +183,7 @@ fn report_problems(problems: &VerifyProblems) {
     }
 }
 
-fn report_log(
-    reporter: &dyn ProgressReporter,
-    level: LogLevel,
-    message: impl Into<String>,
-) {
+fn report_log(reporter: &dyn ProgressReporter, level: LogLevel, message: impl Into<String>) {
     reporter.report(ProgressEvent::Log {
         level,
         message: message.into(),

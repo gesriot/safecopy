@@ -44,7 +44,7 @@ pub fn record(destination_root: &Path, report: &QuarantineReport<'_>) -> Result<
         "  \"source_relative\": \"{}\",",
         json_escape(&report.source_relative.to_string_lossy())
     )?;
-    writeln!(f, "  \"attempts\": {}," , report.attempts)?;
+    writeln!(f, "  \"attempts\": {},", report.attempts)?;
     writeln!(f, "  \"unix_time\": {ts},")?;
     writeln!(f, "  \"reason\": \"{}\"", json_escape(report.reason))?;
     writeln!(f, "}}")?;

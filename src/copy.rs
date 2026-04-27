@@ -59,11 +59,8 @@ pub fn run(opts: &CopyOpts) -> anyhow::Result<()> {
     run_with_reporter(opts, &NoopReporter)
 }
 
-pub fn run_with_reporter(
-    opts: &CopyOpts,
-    reporter: &dyn ProgressReporter,
-) -> anyhow::Result<()> {
-    let (source, destination, existing_manifest) = prepare_copy(opts)?;
+pub fn run_with_reporter(opts: &CopyOpts, reporter: &dyn ProgressReporter) -> anyhow::Result<()> {
+    let (source, destination) = prepare_copy(opts)?;
 
     cleanup_stale_tmp(&destination);
 
@@ -83,6 +80,27 @@ pub fn run_with_reporter(
     );
     println!("Сканирование {}…", source.display());
     let entries = scan_source(&source)?;
+    if !opts.no_manifest_on_card {
+        check_manifest_name_conflict(&entries)?;
+    }
+    // Когда сам пользователь копирует файл с именем manifest.xxh3, destination/manifest.xxh3 —
+    // это его данные (или ровно они после прошлого no-manifest прогона), а не SafeCopy-метаданные.
+    // Парсить такой файл как манифест нельзя: упадём на разделителях.
+    let source_has_manifest_artifact = entries
+        .iter()
+        .any(|e| e.relative.as_os_str() == MANIFEST_FILENAME);
+    let existing_manifest = if source_has_manifest_artifact {
+        report_log(
+            reporter,
+            LogLevel::Info,
+            format!(
+                "Источник содержит {MANIFEST_FILENAME} — resume по существующему манифесту отключён"
+            ),
+        );
+        None
+    } else {
+        load_existing_manifest(&destination)?
+    };
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
     reporter.report(ProgressEvent::Phase(ProgressPhase::Copying));
     reporter.report(ProgressEvent::TotalBytes(total_bytes));
@@ -125,7 +143,11 @@ pub fn run_with_reporter(
     reporter.report(ProgressEvent::Phase(ProgressPhase::Verifying));
     println!("Финальный cold re-read всех файлов…");
     final_reread(&destination, &outcome.manifest, reporter)?;
-    report_log(reporter, LogLevel::Success, "Все файлы прошли повторную проверку");
+    report_log(
+        reporter,
+        LogLevel::Success,
+        "Все файлы прошли повторную проверку",
+    );
     println!("  ✓ все файлы прошли повторную проверку");
 
     if !opts.no_manifest_on_card {
@@ -148,21 +170,24 @@ pub fn run_with_reporter(
     Ok(())
 }
 
-fn prepare_copy(opts: &CopyOpts) -> anyhow::Result<(PathBuf, PathBuf, Option<Manifest>)> {
+fn prepare_copy(opts: &CopyOpts) -> anyhow::Result<(PathBuf, PathBuf)> {
     let source = opts
         .source
         .canonicalize()
         .with_context(|| format!("source не найден: {}", opts.source.display()))?;
-    if !source.is_dir() {
-        bail!("source должен быть папкой: {}", source.display());
+    if !source.is_file() && !source.is_dir() {
+        bail!("source должен быть файлом или папкой: {}", source.display());
     }
 
-    fs::create_dir_all(&opts.destination)
-        .with_context(|| format!("не удалось создать destination {}", opts.destination.display()))?;
+    fs::create_dir_all(&opts.destination).with_context(|| {
+        format!(
+            "не удалось создать destination {}",
+            opts.destination.display()
+        )
+    })?;
     let destination = opts.destination.canonicalize()?;
 
-    let existing_manifest = load_existing_manifest(&destination)?;
-    Ok((source, destination, existing_manifest))
+    Ok((source, destination))
 }
 
 fn load_existing_manifest(destination: &Path) -> anyhow::Result<Option<Manifest>> {
@@ -179,10 +204,10 @@ fn load_existing_manifest(destination: &Path) -> anyhow::Result<Option<Manifest>
                 Ok(Some(m))
             }
             Err(e) => bail!(
-                    "не удалось прочитать существующий манифест: {e}\n\
+                "не удалось прочитать существующий манифест: {e}\n\
                      Если хотите начать заново — удалите {}",
-                    manifest_path.display()
-                ),
+                manifest_path.display()
+            ),
         }
     } else {
         Ok(None)
@@ -219,11 +244,7 @@ fn run_cooldown(seconds: u64, reporter: &dyn ProgressReporter) {
     }
 }
 
-fn report_log(
-    reporter: &dyn ProgressReporter,
-    level: LogLevel,
-    message: impl Into<String>,
-) {
+fn report_log(reporter: &dyn ProgressReporter, level: LogLevel, message: impl Into<String>) {
     reporter.report(ProgressEvent::Log {
         level,
         message: message.into(),
@@ -332,12 +353,17 @@ fn copy_entries(
                 match class {
                     ErrorClass::PersistentDevice => {
                         bar.abandon_with_message("остановлено: неисправность устройства");
-                        bail!("неисправность устройства (файл {}): {e}", entry.relative.display());
+                        bail!(
+                            "неисправность устройства (файл {}): {e}",
+                            entry.relative.display()
+                        );
                     }
                     ErrorClass::Transient | ErrorClass::PersistentFile => {
                         consecutive_failures += 1;
                         if consecutive_failures >= CONSECUTIVE_FAILURE_LIMIT {
-                            bar.abandon_with_message("остановлено: слишком много подряд failed-файлов");
+                            bar.abandon_with_message(
+                                "остановлено: слишком много подряд failed-файлов",
+                            );
                             bail!(
                                 "{consecutive_failures} файлов подряд упали — похоже, проблема в устройстве, а не в файлах"
                             );
@@ -374,6 +400,16 @@ fn print_summary(outcome: &CopyOutcome) {
 }
 
 fn scan_source(source: &Path) -> anyhow::Result<Vec<FileEntry>> {
+    if source.is_file() {
+        let relative = PathBuf::from(source.file_name().context("у source-файла нет имени")?);
+        let size = source.metadata().context("metadata")?.len();
+        return Ok(vec![FileEntry {
+            source_abs: source.to_path_buf(),
+            relative,
+            size,
+        }]);
+    }
+
     let mut entries = Vec::new();
     for entry in WalkDir::new(source).follow_links(false).sort_by_file_name() {
         let entry = entry.context("ошибка обхода source")?;
@@ -393,6 +429,22 @@ fn scan_source(source: &Path) -> anyhow::Result<Vec<FileEntry>> {
         });
     }
     Ok(entries)
+}
+
+/// Артефакты манифеста пишутся в корень destination, так что относительный путь
+/// в корне с тем же именем затёр бы только что скопированный файл.
+fn check_manifest_name_conflict(entries: &[FileEntry]) -> anyhow::Result<()> {
+    for entry in entries {
+        let name = entry.relative.as_os_str();
+        if name == MANIFEST_FILENAME || name == README_FILENAME {
+            bail!(
+                "имя {} конфликтует с артефактом манифеста — \
+                 запустите с --no-manifest-on-card или переименуйте файл",
+                entry.relative.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Копирует один файл с retry; возвращает финальный xxh3 хеш.
@@ -428,7 +480,10 @@ fn copy_one(
             Ok((source_hash, size)) => {
                 if let Err(e) = timestamps::copy_times(source, &tmp) {
                     // Timestamps — best-effort: не откатываем копию из-за них.
-                    eprintln!("  ⚠ не удалось скопировать времена для {}: {e}", dest.display());
+                    eprintln!(
+                        "  ⚠ не удалось скопировать времена для {}: {e}",
+                        dest.display()
+                    );
                     report_log(
                         reporter,
                         LogLevel::Warning,
@@ -670,10 +725,11 @@ fn write_chunk(
     pool_tx: &Sender<IoBuf>,
     written: &mut u64,
 ) -> Result<()> {
-    dst.write_all(&chunk.buf[..chunk.len]).map_err(|e| CopyError::DestinationWrite {
-        path: tmp.to_path_buf(),
-        source: e,
-    })?;
+    dst.write_all(&chunk.buf[..chunk.len])
+        .map_err(|e| CopyError::DestinationWrite {
+            path: tmp.to_path_buf(),
+            source: e,
+        })?;
     *written += chunk.len as u64;
     let _ = pool_tx.send(chunk.buf);
     Ok(())
@@ -706,9 +762,7 @@ fn is_safecopy_tmp_name(name: &str) -> bool {
     };
     let (prefix, num_with_dot) = name.split_at(dot);
     let num = &num_with_dot[1..];
-    prefix.ends_with(TMP_SUFFIX)
-        && !num.is_empty()
-        && num.chars().all(|c| c.is_ascii_digit())
+    prefix.ends_with(TMP_SUFFIX) && !num.is_empty() && num.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Чистит удержанные неудачные .tmp файлы. Ошибки игнорируем —
@@ -754,7 +808,10 @@ fn final_reread(
         match cold_read_hash(&path) {
             Ok(h) if h == *expected => {}
             Ok(h) => {
-                eprintln!("\n✗ {}: хеш расходится (ожидали {expected}, прочитали {h})", rel.display());
+                eprintln!(
+                    "\n✗ {}: хеш расходится (ожидали {expected}, прочитали {h})",
+                    rel.display()
+                );
                 report_log(
                     reporter,
                     LogLevel::Error,
@@ -827,10 +884,8 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock is before UNIX_EPOCH")
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "safecopy-{name}-{}-{stamp}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("safecopy-{name}-{}-{stamp}", std::process::id()));
             fs::create_dir_all(&path).expect("create temp tree");
             Self(path)
         }
@@ -872,5 +927,77 @@ mod tests {
         let repaired = fs::read_to_string(dst.join("small.txt")).expect("read repaired file");
         assert_eq!(repaired, "hello safecopy");
         verify::run(&VerifyOpts { target: dst }).expect("verify repaired destination");
+    }
+
+    #[test]
+    fn single_file_copy_places_file_under_destination_with_manifest() {
+        let tree = TempTree::new("single-file");
+        let src_dir = tree.path().join("src");
+        let dst = tree.path().join("dst");
+        fs::create_dir_all(&src_dir).expect("create source dir");
+        fs::create_dir_all(&dst).expect("create destination");
+        let src_file = src_dir.join("photo.raw");
+        fs::write(&src_file, b"single-file payload").expect("write source file");
+
+        let opts = CopyOpts {
+            source: src_file.clone(),
+            destination: dst.clone(),
+            cooldown_secs: 0,
+            no_manifest_on_card: false,
+            max_retries: 3,
+            unlimited_retries: false,
+        };
+        super::run(&opts).expect("single-file copy");
+
+        let copied = fs::read(dst.join("photo.raw")).expect("read copied file");
+        assert_eq!(copied, b"single-file payload");
+        assert!(
+            dst.join(MANIFEST_FILENAME).is_file(),
+            "manifest должен лежать рядом с файлом"
+        );
+        verify::run(&VerifyOpts { target: dst }).expect("verify single-file destination");
+    }
+
+    #[test]
+    fn manifest_name_collision_aborts_when_manifest_enabled() {
+        let tree = TempTree::new("manifest-collision");
+        let src_dir = tree.path().join("src");
+        let dst = tree.path().join("dst");
+        fs::create_dir_all(&src_dir).expect("create source dir");
+        fs::create_dir_all(&dst).expect("create destination");
+        // Имя файла совпадает с артефактом манифеста — копировать с записью манифеста нельзя.
+        fs::write(
+            src_dir.join(MANIFEST_FILENAME),
+            b"user payload, not a manifest",
+        )
+        .expect("write colliding file");
+
+        let opts = CopyOpts {
+            source: src_dir.clone(),
+            destination: dst.clone(),
+            cooldown_secs: 0,
+            no_manifest_on_card: false,
+            max_retries: 3,
+            unlimited_retries: false,
+        };
+        let err = super::run(&opts).expect_err("должно упасть из-за конфликта имени");
+        assert!(
+            err.to_string().contains("--no-manifest-on-card"),
+            "сообщение должно подсказывать решение, было: {err}"
+        );
+
+        // С отключённым манифестом тот же запуск должен пройти.
+        let opts_no_manifest = CopyOpts {
+            no_manifest_on_card: true,
+            ..opts
+        };
+        super::run(&opts_no_manifest).expect("копирование без манифеста проходит");
+        let copied = fs::read(dst.join(MANIFEST_FILENAME)).expect("read copied file");
+        assert_eq!(copied, b"user payload, not a manifest");
+
+        // Повторный запуск не должен пытаться парсить пользовательский manifest.xxh3 как метаданные.
+        super::run(&opts_no_manifest).expect("повторный no-manifest запуск тоже проходит");
+        let copied_again = fs::read(dst.join(MANIFEST_FILENAME)).expect("read copied file again");
+        assert_eq!(copied_again, b"user payload, not a manifest");
     }
 }

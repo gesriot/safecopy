@@ -17,7 +17,7 @@ pub struct Cli {
 pub enum Command {
     /// Открыть графический интерфейс
     Gui,
-    /// Копировать папку на карту с проверкой целостности
+    /// Копировать файл или папку на карту с проверкой целостности
     Copy(CopyOpts),
     /// Проверить файлы на карте по manifest.xxh3
     Verify(VerifyOpts),
@@ -25,7 +25,7 @@ pub enum Command {
 
 #[derive(Args, Debug)]
 pub struct CopyOpts {
-    /// Исходная папка (источник надёжен)
+    /// Исходный файл или папка (источник надёжен)
     pub source: PathBuf,
     /// Папка назначения на SD-карте
     pub destination: PathBuf,

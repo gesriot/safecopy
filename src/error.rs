@@ -69,9 +69,7 @@ impl CopyError {
         match self {
             SanityFailed { .. } => ErrorClass::PersistentDevice,
 
-            RetriesExhausted { .. } | SourceRead { .. } | Manifest(_) => {
-                ErrorClass::PersistentFile
-            }
+            RetriesExhausted { .. } | SourceRead { .. } | Manifest(_) => ErrorClass::PersistentFile,
 
             HashMismatch { .. } => ErrorClass::Transient,
 

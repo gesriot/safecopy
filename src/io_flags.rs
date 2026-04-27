@@ -61,11 +61,15 @@ impl IoBuf {
     pub fn new(size: usize) -> Self {
         #[cfg(windows)]
         {
-            IoBuf { inner: WindowsAlignedBuf::new(size) }
+            IoBuf {
+                inner: WindowsAlignedBuf::new(size),
+            }
         }
         #[cfg(not(windows))]
         {
-            IoBuf { inner: vec![0u8; size] }
+            IoBuf {
+                inner: vec![0u8; size],
+            }
         }
     }
 }
@@ -74,18 +78,26 @@ impl std::ops::Deref for IoBuf {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         #[cfg(windows)]
-        { &self.inner }
+        {
+            &self.inner
+        }
         #[cfg(not(windows))]
-        { &self.inner }
+        {
+            &self.inner
+        }
     }
 }
 
 impl std::ops::DerefMut for IoBuf {
     fn deref_mut(&mut self) -> &mut [u8] {
         #[cfg(windows)]
-        { &mut self.inner }
+        {
+            &mut self.inner
+        }
         #[cfg(not(windows))]
-        { &mut self.inner }
+        {
+            &mut self.inner
+        }
     }
 }
 
@@ -108,7 +120,11 @@ fn open_cold_read_impl(path: &Path) -> io::Result<File> {
 
 #[cfg(target_os = "macos")]
 fn open_dest_write_impl(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).write(true).truncate(true).open(path)
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
 }
 
 #[cfg(target_os = "macos")]
@@ -143,7 +159,11 @@ fn open_cold_read_impl(path: &Path) -> io::Result<File> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn open_dest_write_impl(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).write(true).truncate(true).open(path)
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -219,7 +239,11 @@ impl WindowsAlignedBuf {
         // SAFETY: layout имеет ненулевой размер (BLOCK_SIZE = 1 МБ).
         let ptr = unsafe { alloc_zeroed(layout) };
         let ptr = std::ptr::NonNull::new(ptr).expect("sector-aligned allocation failed");
-        WindowsAlignedBuf { ptr, layout, len: size }
+        WindowsAlignedBuf {
+            ptr,
+            layout,
+            len: size,
+        }
     }
 }
 

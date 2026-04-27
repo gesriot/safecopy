@@ -185,11 +185,24 @@ impl SafeCopyApp {
             .show(ui, |ui| {
                 ui.label("Источник:");
                 draw_path_field(ui, self.source_dir.as_deref());
-                if ui.button("Выбрать...").clicked() {
-                    self.source_dir = rfd::FileDialog::new()
-                        .set_title("Выберите исходную папку")
-                        .pick_folder();
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Файл...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Выберите исходный файл")
+                            .pick_file()
+                        {
+                            self.source_dir = Some(path);
+                        }
+                    }
+                    if ui.button("Папка...").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Выберите исходную папку")
+                            .pick_folder()
+                        {
+                            self.source_dir = Some(path);
+                        }
+                    }
+                });
                 ui.end_row();
 
                 ui.label("SD-карта:");
