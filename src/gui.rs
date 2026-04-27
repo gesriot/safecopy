@@ -12,12 +12,13 @@ pub fn run() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([600.0, 500.0])
-            .with_min_inner_size([560.0, 440.0]),
+            .with_min_inner_size([560.0, 440.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
 
     eframe::run_native(
-        "SafeCopy",
+        "SaveCopy",
         options,
         Box::new(|cc| {
             configure_fonts(&cc.egui_ctx);
@@ -26,6 +27,11 @@ pub fn run() -> anyhow::Result<()> {
         }),
     )
     .map_err(|e| anyhow::anyhow!("ошибка запуска GUI: {e}"))
+}
+
+fn app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../macos/icon-runtime.png"))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
