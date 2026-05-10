@@ -1,0 +1,19 @@
+[package]
+name = "hashtools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+rfd = "0.15"
+rayon = "1"
+md-5 = "0.10"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
