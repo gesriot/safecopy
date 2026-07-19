@@ -23,7 +23,7 @@ pub fn run() -> anyhow::Result<()> {
         Box::new(|cc| {
             configure_fonts(&cc.egui_ctx);
             cc.egui_ctx.set_visuals(egui::Visuals::light());
-            Box::<SafeCopyApp>::default()
+            Ok(Box::<SafeCopyApp>::default())
         }),
     )
     .map_err(|e| anyhow::anyhow!("ошибка запуска GUI: {e}"))
