@@ -1,0 +1,18 @@
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# Rust (Windows/macOS/Linux builds)
+target/
+dist/
+
+# Claude Code
+.claude/settings.local.json
+
+# Android
+.gradle/
+build/
+local.properties
+keystore.properties
+signing/
+*.jks

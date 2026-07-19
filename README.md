@@ -2,6 +2,9 @@
 
 Reliable file or folder copy to SD cards with end-to-end integrity verification.
 
+The native Android port lives in [`android/`](android/README.md). It supports
+verified copying both to and from an auto-detected USB drive.
+
 Optimised for Windows, but works on macOS and Linux.
 
 ## Why another copy tool?
