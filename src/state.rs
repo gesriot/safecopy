@@ -16,12 +16,15 @@ use std::path::{Path, PathBuf};
 
 use crate::hash::Hasher;
 
+// Независимые флаги-настройки, а не state machine.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Settings {
     pub(crate) cooldown_secs: u64,
     pub(crate) max_retries: u32,
     pub(crate) unlimited_retries: bool,
     pub(crate) no_manifest_on_card: bool,
     pub(crate) respect_gitignore: bool,
+    pub(crate) skip_junk: bool,
 }
 
 impl Default for Settings {
@@ -32,6 +35,7 @@ impl Default for Settings {
             unlimited_retries: true,
             no_manifest_on_card: true,
             respect_gitignore: false,
+            skip_junk: false,
         }
     }
 }
@@ -112,6 +116,11 @@ pub(crate) fn load_settings() -> Settings {
                     settings.respect_gitignore = v;
                 }
             }
+            "skip_junk" => {
+                if let Ok(v) = value.parse() {
+                    settings.skip_junk = v;
+                }
+            }
             _ => {}
         }
     }
@@ -126,12 +135,13 @@ pub(crate) fn save_settings(settings: &Settings) {
         let _ = fs::create_dir_all(parent);
     }
     let text = format!(
-        "cooldown_secs={}\nmax_retries={}\nunlimited_retries={}\nno_manifest_on_card={}\nrespect_gitignore={}\n",
+        "cooldown_secs={}\nmax_retries={}\nunlimited_retries={}\nno_manifest_on_card={}\nrespect_gitignore={}\nskip_junk={}\n",
         settings.cooldown_secs,
         settings.max_retries,
         settings.unlimited_retries,
         settings.no_manifest_on_card,
         settings.respect_gitignore,
+        settings.skip_junk,
     );
     let _ = fs::write(&path, text);
 }

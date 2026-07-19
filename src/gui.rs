@@ -68,6 +68,8 @@ impl ProgressReporter for GuiReporter {
     }
 }
 
+// Независимые флаги-настройки, а не state machine.
+#[allow(clippy::struct_excessive_bools)]
 pub struct SafeCopyApp {
     state: AppState,
     source_dir: Option<PathBuf>,
@@ -77,6 +79,7 @@ pub struct SafeCopyApp {
     unlimited_retries: bool,
     no_manifest_on_card: bool,
     respect_gitignore: bool,
+    skip_junk: bool,
     current_file: String,
     total_bytes: u64,
     completed_bytes: u64,
@@ -97,6 +100,7 @@ impl Default for SafeCopyApp {
             unlimited_retries: settings.unlimited_retries,
             no_manifest_on_card: settings.no_manifest_on_card,
             respect_gitignore: settings.respect_gitignore,
+            skip_junk: settings.skip_junk,
             current_file: String::new(),
             total_bytes: 0,
             completed_bytes: 0,
@@ -248,6 +252,10 @@ impl SafeCopyApp {
                     &mut self.respect_gitignore,
                     "Не копировать файлы, игнорируемые по .gitignore",
                 );
+                ui.checkbox(
+                    &mut self.skip_junk,
+                    "Не копировать кэши и служебные папки (__pycache__, node_modules, venv…)",
+                );
             });
     }
 
@@ -336,6 +344,7 @@ impl SafeCopyApp {
             max_retries: self.max_retries,
             unlimited_retries: self.unlimited_retries,
             respect_gitignore: self.respect_gitignore,
+            skip_junk: self.skip_junk,
         };
         self.spawn_worker(ctx, move |reporter| {
             copy::run_with_reporter(&opts, reporter)
@@ -378,6 +387,7 @@ impl SafeCopyApp {
             unlimited_retries: self.unlimited_retries,
             no_manifest_on_card: self.no_manifest_on_card,
             respect_gitignore: self.respect_gitignore,
+            skip_junk: self.skip_junk,
         });
     }
 

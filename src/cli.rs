@@ -23,6 +23,8 @@ pub enum Command {
     Verify(VerifyOpts),
 }
 
+// Независимые флаги-настройки, а не state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Args, Debug)]
 pub struct CopyOpts {
     /// Исходный файл или папка (источник надёжен)
@@ -60,6 +62,11 @@ pub struct CopyOpts {
     /// Не копировать файлы, игнорируемые по правилам .gitignore внутри источника
     #[arg(long)]
     pub respect_gitignore: bool,
+    /// Не копировать служебный «мусор» инструментов разработки: кэши и артефакты
+    /// (`__pycache__`, `node_modules`, `dist`, `venv`/`.venv` и `*-venv`, `.*cache`,
+    /// `.pytest-tmp*`, `*.egg-info`, `.tox`, `.claude`, `.agents`, `.DS_Store`, `Thumbs.db`…)
+    #[arg(long)]
+    pub skip_junk: bool,
 }
 
 #[derive(Args, Debug)]

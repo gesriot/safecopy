@@ -31,6 +31,7 @@ For SD cards that assumption is wrong:
 - **Error classification** – `Transient` (retry with exponential backoff), `PersistentFile` (quarantine and continue), `PersistentDevice` (stop the whole run: disk full, permission denied, or too many consecutive failures).
 - **Unlimited retries** – enabled by default (`--unlimited-retries=false` / GUI checkbox to cap attempts): keeps retrying transient write/verify failures without a cap. Each failed attempt leaves its `.safecopy.tmp.<N>` on the card so the filesystem is forced to allocate different sectors on the next try.
 - **.gitignore filter** – optional (`--respect-gitignore` / GUI checkbox, off by default): when copying a code repository, files matched by the repo's own `.gitignore` rules (`target/`, `node_modules/`, build artifacts…) are skipped. Only `.gitignore` files inside the source tree are honoured – no global gitignore, no `.git/info/exclude`.
+- **Junk filter** – optional (`--skip-junk` / GUI checkbox, off by default): skips development-tool caches and artifacts regardless of `.gitignore`: `__pycache__`, `node_modules`, `dist`, `venv`/`.venv` and `*-venv`, dot-dirs ending in `cache` (`.mypy_cache`, `.nuitka-cache`…), `.pytest-tmp*`, `*.egg-info`, `.tox`, `.nox`, `.eggs`, `.claude`, `.agents`, `.mplconfig`, plus OS litter files (`.DS_Store`, `Thumbs.db`, `desktop.ini`).
 - **Quarantine folder** – files that can't be copied produce a JSON report in `.quarantine/` with timestamp, attempt count and reason. File-level failures continue with the next file; device-level failures stop the run.
 - **Timestamps preserved** – `mtime`, `atime`, and (on Windows) the creation time.
 - **Path-traversal safe** – the manifest reader rejects absolute paths, `..`, and Windows drive-letter prefixes so a hostile manifest cannot make `verify` read files outside the destination.
@@ -65,6 +66,7 @@ safecopy copy <SOURCE> <DEST_DIR> [--cooldown-secs N]
                                   [--unlimited-retries[=BOOL]]
                                   [--no-manifest-on-card[=BOOL]]
                                   [--respect-gitignore]
+                                  [--skip-junk]
 
 safecopy verify <DIR_OR_MANIFEST>
 
@@ -73,7 +75,7 @@ safecopy gui                # launch the desktop UI explicitly
 
 `<SOURCE>` is either a file or a folder. `<DEST_DIR>` is always a folder on the card; a single-file source is placed at `<DEST_DIR>/<filename>`, a folder source is copied together with its name into `<DEST_DIR>/<folder-name>/`.
 
-Defaults: `--cooldown-secs 45`, `--max-retries 3`. `--unlimited-retries` and `--no-manifest-on-card` are **on** by default (disable with `=false`), `--respect-gitignore` is off.
+Defaults: `--cooldown-secs 45`, `--max-retries 3`. `--unlimited-retries` and `--no-manifest-on-card` are **on** by default (disable with `=false`), `--respect-gitignore` and `--skip-junk` are off.
 
 Examples:
 

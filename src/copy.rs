@@ -79,7 +79,7 @@ pub fn run_with_reporter(opts: &CopyOpts, reporter: &dyn ProgressReporter) -> an
         format!("Сканирование {}...", source.display()),
     );
     println!("Сканирование {}…", source.display());
-    let entries = scan_source(&source, opts.respect_gitignore, reporter)?;
+    let entries = scan_source(&source, opts.respect_gitignore, opts.skip_junk, reporter)?;
     check_filenames(&entries)?;
     if !opts.no_manifest_on_card {
         check_manifest_name_conflict(&entries)?;
@@ -498,6 +498,7 @@ fn print_summary(outcome: &CopyOutcome) {
 fn scan_source(
     source: &Path,
     respect_gitignore: bool,
+    skip_junk: bool,
     reporter: &dyn ProgressReporter,
 ) -> anyhow::Result<Vec<FileEntry>> {
     if source.is_file() {
@@ -529,6 +530,11 @@ fn scan_source(
         .require_git(false)
         .git_ignore(respect_gitignore)
         .sort_by_file_name(std::cmp::Ord::cmp);
+    if skip_junk {
+        // depth 0 — сам source: даже папка с «мусорным» именем копируется,
+        // раз пользователь выбрал её явно.
+        walker.filter_entry(|entry| entry.depth() == 0 || !is_junk_entry(entry));
+    }
 
     let mut entries = Vec::new();
     for result in walker.build() {
@@ -563,6 +569,47 @@ fn scan_source(
         });
     }
     Ok(entries)
+}
+
+/// Служебный «мусор» инструментов разработки, который не хочется тащить на карту
+/// независимо от .gitignore. Помимо точных имён — общие паттерны, покрывающие
+/// целые семейства: `.mypy_cache` / `.nuitka-cache` / `.cache`, `.build-venv`,
+/// `.pytest-tmp-parallel3` / `.pytest-tmp-rustpkg`, `pkg.egg-info` и т.п.
+fn is_junk_entry(entry: &ignore::DirEntry) -> bool {
+    let Some(name) = entry.file_name().to_str() else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    if entry.file_type().is_some_and(|t| t.is_dir()) {
+        is_junk_dir_name(&name)
+    } else {
+        is_junk_file_name(&name)
+    }
+}
+
+fn is_junk_dir_name(name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        ".agents",
+        ".claude",
+        ".mplconfig",
+        "__pycache__",
+        "node_modules",
+        "dist",
+        ".venv",
+        "venv",
+        ".tox",
+        ".nox",
+        ".eggs",
+    ];
+    EXACT.contains(&name)
+        || (name.starts_with('.') && name.ends_with("cache"))
+        || name.ends_with("-venv")
+        || name.starts_with(".pytest-tmp")
+        || name.ends_with(".egg-info")
+}
+
+fn is_junk_file_name(name: &str) -> bool {
+    matches!(name, ".ds_store" | "thumbs.db" | "desktop.ini")
 }
 
 fn walk_error_is_not_found(error: &ignore::Error) -> bool {
@@ -1089,6 +1136,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: false,
+            skip_junk: false,
         };
         super::run(&opts).expect("initial copy");
 
@@ -1128,6 +1176,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: false,
+            skip_junk: false,
         };
         super::run(&opts).expect("single-file copy");
 
@@ -1161,6 +1210,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: false,
+            skip_junk: false,
         };
         let err = super::run(&opts).expect_err("должно упасть из-за конфликта имени");
         assert!(
@@ -1203,6 +1253,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: false,
+            skip_junk: false,
         };
         let err = super::run(&opts).expect_err("должно упасть из-за конфликта имени папки");
         assert!(err.to_string().contains("--no-manifest-on-card"));
@@ -1237,6 +1288,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: true,
+            skip_junk: false,
         };
         super::run(&opts).expect("copy with gitignore filter");
 
@@ -1273,6 +1325,82 @@ mod tests {
             .join("target")
             .join("artifact.bin")
             .is_file());
+    }
+
+    #[test]
+    fn skip_junk_skips_tool_caches_and_artifacts() {
+        init_state_dir();
+        let tree = TempTree::new("junk");
+        let src = tree.path().join("proj");
+        let dst = tree.path().join("dst");
+        fs::create_dir_all(&dst).expect("create destination");
+        for dir in [
+            "__pycache__",
+            ".claude",
+            ".build-venv",
+            ".nuitka-cache",
+            ".pytest-tmp-parallel3",
+            "dist",
+            "src",
+        ] {
+            fs::create_dir_all(src.join(dir)).expect("create source dir");
+            fs::write(src.join(dir).join("f.bin"), b"data").expect("write file");
+        }
+        fs::write(src.join("main.py"), b"print()").expect("write source file");
+        fs::write(src.join("Thumbs.db"), b"os junk").expect("write junk file");
+        // Файл с «папочным» именем мусора не должен отфильтровываться.
+        fs::write(src.join("dist").join("keep.txt"), b"x").expect("write nested");
+        fs::write(src.join("src").join("dist"), b"file named dist").expect("write file");
+
+        let opts = CopyOpts {
+            source: src.clone(),
+            destination: dst.clone(),
+            cooldown_secs: 0,
+            no_manifest_on_card: true,
+            max_retries: 3,
+            unlimited_retries: false,
+            respect_gitignore: false,
+            skip_junk: true,
+        };
+        super::run(&opts).expect("copy with junk filter");
+
+        let copied_root = dst.join("proj");
+        assert!(copied_root.join("main.py").is_file(), "код копируется");
+        assert!(
+            copied_root.join("src").join("dist").is_file(),
+            "обычный файл с именем dist копируется"
+        );
+        for dir in [
+            "__pycache__",
+            ".claude",
+            ".build-venv",
+            ".nuitka-cache",
+            ".pytest-tmp-parallel3",
+            "dist",
+        ] {
+            assert!(
+                !copied_root.join(dir).exists(),
+                "{dir} должен быть исключён"
+            );
+        }
+        assert!(
+            !copied_root.join("Thumbs.db").exists(),
+            "Thumbs.db должен быть исключён"
+        );
+
+        // Сам source с «мусорным» именем всё равно копируется: выбор явный.
+        let junk_named_src = tree.path().join("dist");
+        fs::create_dir_all(&junk_named_src).expect("create junk-named source");
+        fs::write(junk_named_src.join("payload.txt"), b"y").expect("write payload");
+        let dst2 = tree.path().join("dst2");
+        fs::create_dir_all(&dst2).expect("create destination");
+        let opts2 = CopyOpts {
+            source: junk_named_src,
+            destination: dst2.clone(),
+            ..opts
+        };
+        super::run(&opts2).expect("copy junk-named source");
+        assert!(dst2.join("dist").join("payload.txt").is_file());
     }
 
     #[test]
@@ -1316,6 +1444,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: false,
+            skip_junk: false,
         };
         let err = super::run(&opts_inside).expect_err("destination внутри source");
         assert!(err.to_string().contains("внутри source"), "было: {err}");
@@ -1351,6 +1480,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: false,
+            skip_junk: false,
         };
         let err = super::run(&opts).expect_err("имя с переносом строки должно отвергаться");
         assert!(err.to_string().contains("перенос строки"), "было: {err}");
@@ -1374,6 +1504,7 @@ mod tests {
             max_retries: 3,
             unlimited_retries: false,
             respect_gitignore: false,
+            skip_junk: false,
         };
         super::run(&opts).expect("initial copy");
 
