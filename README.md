@@ -20,14 +20,17 @@ For SD cards that assumption is wrong:
 ## Features
 
 - **XXH3-128** content hashing – fast enough that the SD card is the bottleneck, not the CPU.
-- **Cache-bypass reads** – `FILE_FLAG_NO_BUFFERING` on Windows, `F_NOCACHE` on macOS, `posix_fadvise(DONTNEED)` on Linux. Verification reads come from the physical card, not from RAM.
+- **Cache-bypass reads** – `FILE_FLAG_NO_BUFFERING` on Windows, `F_NOCACHE` on macOS, `posix_fadvise(DONTNEED)` on Linux. Verification reads come from the physical card, not from RAM. Note: on Linux `posix_fadvise` is an advisory hint, so the cache bypass there is best-effort, weaker than the hard guarantees on Windows/macOS.
 - **Write-through writes** – `FILE_FLAG_WRITE_THROUGH` + `FlushFileBuffers` on Windows, `F_FULLFSYNC` on macOS. Data hits the device, not the page cache.
 - **Sector-aligned I/O buffer** – a custom aligned allocator on Windows so that `FILE_FLAG_NO_BUFFERING` reads actually succeed.
 - **Pre-flight sanity check** – writes and cold-reads a 10 MB pseudorandom probe before the real work starts. Bad reader / dead card fails fast.
 - **`manifest.xxh3`** – written to the destination directory in `xxhsum -c` compatible format. The recipient can verify with `xxhsum -c manifest.xxh3` or with `safecopy verify`.
-- **Resume-safe** – if a previous run was interrupted, re-running `safecopy copy` reads the existing manifest, skips files whose source **and** cold-read hashes match, and removes stale `.safecopy.tmp` / `.safecopy.tmp.<N>` files.
+- **Resume-safe** – if a previous run was interrupted, re-running `safecopy copy` skips files whose source **and** cold-read destination hashes match the previous run, and removes stale `.safecopy.tmp` / `.safecopy.tmp.<N>` files. Resume works even with the manifest on the card disabled: a local checkpoint keyed by (source, destination) is saved after every verified file – next to the exe in `safecopy-state\` on Windows (portable), in `~/Library/Application Support/SafeCopy` on macOS, in `$XDG_DATA_HOME/safecopy` on Linux.
+- **Settings remembered** – the GUI persists cooldown, retries, and checkboxes in the same per-platform state directory (`SAFECOPY_STATE_DIR` env var overrides the location).
+- **Overlap guard** – copying a folder into itself or into its own subdirectory is rejected up front instead of silently overwriting the source.
 - **Error classification** – `Transient` (retry with exponential backoff), `PersistentFile` (quarantine and continue), `PersistentDevice` (stop the whole run: disk full, permission denied, or too many consecutive failures).
-- **Unlimited retries** – optional mode (`--unlimited-retries` / GUI checkbox) that keeps retrying transient write/verify failures without a cap. Each failed attempt leaves its `.safecopy.tmp.<N>` on the card so the filesystem is forced to allocate different sectors on the next try.
+- **Unlimited retries** – enabled by default (`--unlimited-retries=false` / GUI checkbox to cap attempts): keeps retrying transient write/verify failures without a cap. Each failed attempt leaves its `.safecopy.tmp.<N>` on the card so the filesystem is forced to allocate different sectors on the next try.
+- **.gitignore filter** – optional (`--respect-gitignore` / GUI checkbox, off by default): when copying a code repository, files matched by the repo's own `.gitignore` rules (`target/`, `node_modules/`, build artifacts…) are skipped. Only `.gitignore` files inside the source tree are honoured – no global gitignore, no `.git/info/exclude`.
 - **Quarantine folder** – files that can't be copied produce a JSON report in `.quarantine/` with timestamp, attempt count and reason. File-level failures continue with the next file; device-level failures stop the run.
 - **Timestamps preserved** – `mtime`, `atime`, and (on Windows) the creation time.
 - **Path-traversal safe** – the manifest reader rejects absolute paths, `..`, and Windows drive-letter prefixes so a hostile manifest cannot make `verify` read files outside the destination.
@@ -47,7 +50,7 @@ Double-click `safecopy.exe`, or run it with no arguments:
 
 1. Pick a source: click **Файл...** to copy a single file, or **Папка...** to copy a whole tree.
 2. Pick the destination folder on the SD card.
-3. Optionally expand **Настройки** to change cooldown, retry count, enable unlimited retries, or disable writing the manifest to the card.
+3. Optionally expand **Настройки** to change cooldown, retry count, toggle unlimited retries (on by default), toggle the manifest on the card (off by default), or enable the `.gitignore` filter. Settings are remembered between launches.
 4. Click **НАЧАТЬ КОПИРОВАНИЕ**.
 
 Progress bar, current filename, and per-file log (OK / WARN / RETRY / QUARANTINE / ERROR) are shown live.
@@ -59,17 +62,18 @@ The **Только проверка** button runs the standalone verification pa
 ```
 safecopy copy <SOURCE> <DEST_DIR> [--cooldown-secs N]
                                   [--max-retries N]
-                                  [--unlimited-retries]
-                                  [--no-manifest-on-card]
+                                  [--unlimited-retries[=BOOL]]
+                                  [--no-manifest-on-card[=BOOL]]
+                                  [--respect-gitignore]
 
 safecopy verify <DIR_OR_MANIFEST>
 
 safecopy gui                # launch the desktop UI explicitly
 ```
 
-`<SOURCE>` is either a file or a folder. `<DEST_DIR>` is always a folder on the card; a single-file source is placed at `<DEST_DIR>/<filename>`.
+`<SOURCE>` is either a file or a folder. `<DEST_DIR>` is always a folder on the card; a single-file source is placed at `<DEST_DIR>/<filename>`, a folder source is copied together with its name into `<DEST_DIR>/<folder-name>/`.
 
-Defaults: `--cooldown-secs 45`, `--max-retries 3`. `--unlimited-retries` is off by default.
+Defaults: `--cooldown-secs 45`, `--max-retries 3`. `--unlimited-retries` and `--no-manifest-on-card` are **on** by default (disable with `=false`), `--respect-gitignore` is off.
 
 Examples:
 
@@ -81,7 +85,7 @@ safecopy verify "E:\"
 safecopy verify "E:\manifest.xxh3"
 ```
 
-If the source contains a file literally named `manifest.xxh3` or `manifest.README.txt` at its root, SafeCopy refuses to start because writing the manifest would clobber the user's file. Re-run with `--no-manifest-on-card` to copy without writing a manifest. If the source root contains `manifest.xxh3`, resume against an existing destination manifest is also disabled, because `<DEST_DIR>/manifest.xxh3` is user data in that scenario.
+If copying would place a user file or folder literally named `manifest.xxh3` or `manifest.README.txt` at the destination root (a single file with that name, or a source folder itself named like that), SafeCopy refuses to start with manifest writing enabled because the manifest artifact would clobber the user's data. Re-run with `--no-manifest-on-card` to copy without writing a manifest; resume against an existing destination manifest is also disabled in that scenario, because `<DEST_DIR>/manifest.xxh3` is user data.
 
 After a successful `copy`, the destination directory contains:
 

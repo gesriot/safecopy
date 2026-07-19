@@ -21,7 +21,7 @@ use crate::io_flags::{self, IoBuf, BLOCK_SIZE};
 use crate::manifest::{Manifest, MANIFEST_FILENAME, README_CONTENT, README_FILENAME};
 use crate::progress::{LogLevel, NoopReporter, ProgressEvent, ProgressPhase, ProgressReporter};
 use crate::quarantine::{self, QuarantineReport};
-use crate::{sanity, timestamps};
+use crate::{sanity, state, timestamps};
 
 /// Сколько раз подряд может упасть с `PersistentFile` прежде чем мы решим,
 /// что проблема в устройстве, а не в конкретных файлах.
@@ -79,28 +79,14 @@ pub fn run_with_reporter(opts: &CopyOpts, reporter: &dyn ProgressReporter) -> an
         format!("Сканирование {}...", source.display()),
     );
     println!("Сканирование {}…", source.display());
-    let entries = scan_source(&source)?;
+    let entries = scan_source(&source, opts.respect_gitignore)?;
+    check_filenames(&entries)?;
     if !opts.no_manifest_on_card {
         check_manifest_name_conflict(&entries)?;
     }
-    // Когда сам пользователь копирует файл с именем manifest.xxh3, destination/manifest.xxh3 —
-    // это его данные (или ровно они после прошлого no-manifest прогона), а не SafeCopy-метаданные.
-    // Парсить такой файл как манифест нельзя: упадём на разделителях.
-    let source_has_manifest_artifact = entries
-        .iter()
-        .any(|e| e.relative.as_os_str() == MANIFEST_FILENAME);
-    let existing_manifest = if source_has_manifest_artifact {
-        report_log(
-            reporter,
-            LogLevel::Info,
-            format!(
-                "Источник содержит {MANIFEST_FILENAME} — resume по существующему манифесту отключён"
-            ),
-        );
-        None
-    } else {
-        load_existing_manifest(&destination)?
-    };
+    let checkpoint = state::checkpoint_path(&source, &destination);
+    let existing_manifest =
+        resolve_resume_manifest(&entries, &destination, checkpoint.as_deref(), reporter)?;
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
     reporter.report(ProgressEvent::Phase(ProgressPhase::Copying));
     reporter.report(ProgressEvent::TotalBytes(total_bytes));
@@ -124,6 +110,7 @@ pub fn run_with_reporter(opts: &CopyOpts, reporter: &dyn ProgressReporter) -> an
         &entries,
         &destination,
         existing_manifest.as_ref(),
+        checkpoint.as_deref(),
         opts,
         &bar,
         reporter,
@@ -187,6 +174,26 @@ fn prepare_copy(opts: &CopyOpts) -> anyhow::Result<(PathBuf, PathBuf)> {
     })?;
     let destination = opts.destination.canonicalize()?;
 
+    // Пересечение источника и назначения превратило бы копирование в запись
+    // поверх самого себя (снапшот скана спасает от бесконечной рекурсии,
+    // но не от порчи данных).
+    if source.is_dir() && destination.starts_with(&source) {
+        bail!(
+            "destination находится внутри source ({} ⊂ {}) — выберите папку вне источника",
+            destination.display(),
+            source.display()
+        );
+    }
+    if let Some(name) = source.file_name() {
+        if destination.join(name) == source {
+            bail!(
+                "копирование {} в {} записало бы источник поверх самого себя",
+                source.display(),
+                destination.display()
+            );
+        }
+    }
+
     Ok((source, destination))
 }
 
@@ -211,6 +218,91 @@ fn load_existing_manifest(destination: &Path) -> anyhow::Result<Option<Manifest>
         }
     } else {
         Ok(None)
+    }
+}
+
+/// Определяет манифест для resume: манифест на карте, если он — метаданные
+/// `SafeCopy`, иначе локальный checkpoint.
+///
+/// Когда сам пользователь копирует файл (или папку) с именем manifest.xxh3,
+/// destination/manifest.xxh3 — это его данные (или ровно они после прошлого
+/// no-manifest прогона), а не SafeCopy-метаданные. Парсить такой файл как
+/// манифест нельзя: упадём на разделителях.
+fn resolve_resume_manifest(
+    entries: &[FileEntry],
+    destination: &Path,
+    checkpoint: Option<&Path>,
+    reporter: &dyn ProgressReporter,
+) -> anyhow::Result<Option<Manifest>> {
+    let source_has_manifest_artifact = entries.iter().any(|e| {
+        e.relative
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == MANIFEST_FILENAME)
+    });
+    let card_manifest = if source_has_manifest_artifact {
+        report_log(
+            reporter,
+            LogLevel::Info,
+            format!(
+                "Источник содержит {MANIFEST_FILENAME} — resume по манифесту на карте отключён"
+            ),
+        );
+        None
+    } else {
+        load_existing_manifest(destination)?
+    };
+    // Локальный checkpoint даёт resume и без манифеста на карте.
+    Ok(match card_manifest {
+        Some(m) => Some(m),
+        None => load_checkpoint(checkpoint, reporter),
+    })
+}
+
+/// Читает локальный checkpoint, если он есть. Нечитаемый checkpoint — не повод
+/// останавливать копирование: молча удаляем и продолжаем без resume.
+fn load_checkpoint(checkpoint: Option<&Path>, reporter: &dyn ProgressReporter) -> Option<Manifest> {
+    let path = checkpoint?;
+    if !path.exists() {
+        return None;
+    }
+    let Ok(m) = Manifest::read_from(path) else {
+        let _ = fs::remove_file(path);
+        return None;
+    };
+    println!(
+        "Найден локальный checkpoint ({} файлов) — продолжаем с места остановки.",
+        m.len()
+    );
+    report_log(
+        reporter,
+        LogLevel::Info,
+        format!(
+            "Найден локальный checkpoint ({} файлов) — проверяю resume",
+            m.len()
+        ),
+    );
+    Some(m)
+}
+
+/// Сохраняет checkpoint после каждого подтверждённого файла. Best-effort:
+/// сбой не прерывает копирование, только отключает будущий resume.
+fn save_checkpoint(
+    checkpoint: Option<&Path>,
+    manifest: &Manifest,
+    warned: &mut bool,
+    reporter: &dyn ProgressReporter,
+) {
+    let Some(path) = checkpoint else { return };
+    if let Err(e) = manifest.write_to(path) {
+        if !*warned {
+            *warned = true;
+            report_log(
+                reporter,
+                LogLevel::Warning,
+                format!("[WARN] Не удалось сохранить checkpoint ({e}) — resume после прерывания не сработает"),
+            );
+        }
     }
 }
 
@@ -272,6 +364,7 @@ fn copy_entries(
     entries: &[FileEntry],
     destination: &Path,
     existing_manifest: Option<&Manifest>,
+    checkpoint: Option<&Path>,
     opts: &CopyOpts,
     bar: &ProgressBar,
     reporter: &dyn ProgressReporter,
@@ -279,6 +372,7 @@ fn copy_entries(
     let mut manifest = Manifest::new();
     let mut consecutive_failures: u32 = 0;
     let mut failed_files: Vec<PathBuf> = Vec::new();
+    let mut checkpoint_warned = false;
 
     for entry in entries {
         bar.set_message(entry.relative.display().to_string());
@@ -293,6 +387,7 @@ fn copy_entries(
             if let Some(&prev_hash) = em.get(&entry.relative) {
                 if should_skip_existing(&entry.source_abs, &dest_abs, prev_hash) {
                     manifest.insert(entry.relative.clone(), prev_hash);
+                    save_checkpoint(checkpoint, &manifest, &mut checkpoint_warned, reporter);
                     bar.inc(entry.size);
                     reporter.report(ProgressEvent::BytesAdvanced(entry.size));
                     report_log(
@@ -315,6 +410,7 @@ fn copy_entries(
         ) {
             Ok(hash) => {
                 manifest.insert(entry.relative.clone(), hash);
+                save_checkpoint(checkpoint, &manifest, &mut checkpoint_warned, reporter);
                 consecutive_failures = 0;
                 report_log(
                     reporter,
@@ -399,7 +495,7 @@ fn print_summary(outcome: &CopyOutcome) {
     }
 }
 
-fn scan_source(source: &Path) -> anyhow::Result<Vec<FileEntry>> {
+fn scan_source(source: &Path, respect_gitignore: bool) -> anyhow::Result<Vec<FileEntry>> {
     if source.is_file() {
         let relative = PathBuf::from(source.file_name().context("у source-файла нет имени")?);
         let size = source.metadata().context("metadata")?.len();
@@ -410,17 +506,38 @@ fn scan_source(source: &Path) -> anyhow::Result<Vec<FileEntry>> {
         }]);
     }
 
+    // Папка копируется вместе со своим именем: оно становится первым компонентом
+    // относительного пути. У корня файловой системы имени нет — тогда копируется
+    // содержимое напрямую.
+    let prefix = source.file_name().map(PathBuf::from);
+
+    let mut walker = ignore::WalkBuilder::new(source);
+    walker
+        .follow_links(false)
+        // Учитываем только сами .gitignore внутри источника: скрытые файлы копируем,
+        // .ignore / глобальный gitignore / .git/info/exclude / родительские .gitignore
+        // не трогаем, и не требуем наличия .git.
+        .hidden(false)
+        .ignore(false)
+        .parents(false)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
+        .git_ignore(respect_gitignore)
+        .sort_by_file_name(std::cmp::Ord::cmp);
+
     let mut entries = Vec::new();
-    for entry in WalkDir::new(source).follow_links(false).sort_by_file_name() {
+    for entry in walker.build() {
         let entry = entry.context("ошибка обхода source")?;
-        if !entry.file_type().is_file() {
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
         let abs = entry.path().to_path_buf();
-        let relative = abs
-            .strip_prefix(source)
-            .context("strip_prefix failed")?
-            .to_path_buf();
+        let stripped = abs.strip_prefix(source).context("strip_prefix failed")?;
+        let relative = match &prefix {
+            Some(p) => p.join(stripped),
+            None => stripped.to_path_buf(),
+        };
         let size = entry.metadata().context("metadata")?.len();
         entries.push(FileEntry {
             source_abs: abs,
@@ -431,11 +548,29 @@ fn scan_source(source: &Path) -> anyhow::Result<Vec<FileEntry>> {
     Ok(entries)
 }
 
-/// Артефакты манифеста пишутся в корень destination, так что относительный путь
-/// в корне с тем же именем затёр бы только что скопированный файл.
+/// Манифест и checkpoint — построчные форматы: перенос строки в имени файла
+/// молча разорвал бы запись на две. Такие имена возможны на macOS/Linux.
+fn check_filenames(entries: &[FileEntry]) -> anyhow::Result<()> {
+    for entry in entries {
+        if entry.relative.to_string_lossy().contains(['\n', '\r']) {
+            bail!(
+                "имя файла содержит перенос строки и не может быть записано в манифест: {}",
+                entry.relative.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Артефакты манифеста пишутся в корень destination, так что первый компонент
+/// относительного пути с тем же именем (файл в корне или сама копируемая папка)
+/// затёр бы только что скопированные данные.
 fn check_manifest_name_conflict(entries: &[FileEntry]) -> anyhow::Result<()> {
     for entry in entries {
-        let name = entry.relative.as_os_str();
+        let Some(first) = entry.relative.components().next() else {
+            continue;
+        };
+        let name = first.as_os_str();
         if name == MANIFEST_FILENAME || name == README_FILENAME {
             bail!(
                 "имя {} конфликтует с артефактом манифеста — \
@@ -901,8 +1036,20 @@ mod tests {
         }
     }
 
+    /// Уводит состояние (настройки, checkpoint'ы) в temp-каталог, чтобы тесты
+    /// не писали в реальный каталог пользователя. Один общий каталог на процесс.
+    fn init_state_dir() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let dir =
+                std::env::temp_dir().join(format!("safecopy-test-state-{}", std::process::id()));
+            std::env::set_var("SAFECOPY_STATE_DIR", &dir);
+        });
+    }
+
     #[test]
     fn resume_rewrites_corrupted_destination_file() {
+        init_state_dir();
         let tree = TempTree::new("resume-corrupt");
         let src = tree.path().join("src");
         let dst = tree.path().join("dst");
@@ -918,19 +1065,30 @@ mod tests {
             no_manifest_on_card: false,
             max_retries: 3,
             unlimited_retries: false,
+            respect_gitignore: false,
         };
         super::run(&opts).expect("initial copy");
 
-        fs::write(dst.join("small.txt"), b"corrupted on card").expect("corrupt destination");
+        // Папка копируется вместе со своим именем.
+        let copied_root = dst.join("src");
+        assert!(
+            copied_root.join("nested").join("other.txt").is_file(),
+            "файлы должны лежать внутри dst/<имя папки>/"
+        );
+
+        fs::write(copied_root.join("small.txt"), b"corrupted on card")
+            .expect("corrupt destination");
         super::run(&opts).expect("resume should repair destination");
 
-        let repaired = fs::read_to_string(dst.join("small.txt")).expect("read repaired file");
+        let repaired =
+            fs::read_to_string(copied_root.join("small.txt")).expect("read repaired file");
         assert_eq!(repaired, "hello safecopy");
         verify::run(&VerifyOpts { target: dst }).expect("verify repaired destination");
     }
 
     #[test]
     fn single_file_copy_places_file_under_destination_with_manifest() {
+        init_state_dir();
         let tree = TempTree::new("single-file");
         let src_dir = tree.path().join("src");
         let dst = tree.path().join("dst");
@@ -946,6 +1104,7 @@ mod tests {
             no_manifest_on_card: false,
             max_retries: 3,
             unlimited_retries: false,
+            respect_gitignore: false,
         };
         super::run(&opts).expect("single-file copy");
 
@@ -960,25 +1119,25 @@ mod tests {
 
     #[test]
     fn manifest_name_collision_aborts_when_manifest_enabled() {
+        init_state_dir();
         let tree = TempTree::new("manifest-collision");
         let src_dir = tree.path().join("src");
         let dst = tree.path().join("dst");
         fs::create_dir_all(&src_dir).expect("create source dir");
         fs::create_dir_all(&dst).expect("create destination");
-        // Имя файла совпадает с артефактом манифеста — копировать с записью манифеста нельзя.
-        fs::write(
-            src_dir.join(MANIFEST_FILENAME),
-            b"user payload, not a manifest",
-        )
-        .expect("write colliding file");
+        // Файл с именем артефакта манифеста, копируемый одиночным файлом в корень
+        // destination, — копировать с записью манифеста нельзя.
+        let colliding = src_dir.join(MANIFEST_FILENAME);
+        fs::write(&colliding, b"user payload, not a manifest").expect("write colliding file");
 
         let opts = CopyOpts {
-            source: src_dir.clone(),
+            source: colliding.clone(),
             destination: dst.clone(),
             cooldown_secs: 0,
             no_manifest_on_card: false,
             max_retries: 3,
             unlimited_retries: false,
+            respect_gitignore: false,
         };
         let err = super::run(&opts).expect_err("должно упасть из-за конфликта имени");
         assert!(
@@ -999,5 +1158,192 @@ mod tests {
         super::run(&opts_no_manifest).expect("повторный no-manifest запуск тоже проходит");
         let copied_again = fs::read(dst.join(MANIFEST_FILENAME)).expect("read copied file again");
         assert_eq!(copied_again, b"user payload, not a manifest");
+    }
+
+    #[test]
+    fn folder_copied_inside_manifest_named_source_keeps_conflict_check() {
+        init_state_dir();
+        let tree = TempTree::new("manifest-dir-collision");
+        let src_dir = tree.path().join(MANIFEST_FILENAME);
+        let dst = tree.path().join("dst");
+        fs::create_dir_all(&src_dir).expect("create source dir");
+        fs::create_dir_all(&dst).expect("create destination");
+        fs::write(src_dir.join("data.txt"), b"payload").expect("write source file");
+
+        // Сама папка называется manifest.xxh3 — её имя стало бы корневым компонентом
+        // на карте и конфликтовало бы с артефактом манифеста.
+        let opts = CopyOpts {
+            source: src_dir.clone(),
+            destination: dst.clone(),
+            cooldown_secs: 0,
+            no_manifest_on_card: false,
+            max_retries: 3,
+            unlimited_retries: false,
+            respect_gitignore: false,
+        };
+        let err = super::run(&opts).expect_err("должно упасть из-за конфликта имени папки");
+        assert!(err.to_string().contains("--no-manifest-on-card"));
+
+        let opts_no_manifest = CopyOpts {
+            no_manifest_on_card: true,
+            ..opts
+        };
+        super::run(&opts_no_manifest).expect("без манифеста копирование проходит");
+        let copied = fs::read(dst.join(MANIFEST_FILENAME).join("data.txt")).expect("read copied");
+        assert_eq!(copied, b"payload");
+    }
+
+    #[test]
+    fn respect_gitignore_skips_ignored_files() {
+        init_state_dir();
+        let tree = TempTree::new("gitignore");
+        let src = tree.path().join("repo");
+        let dst = tree.path().join("dst");
+        fs::create_dir_all(src.join("target")).expect("create source");
+        fs::create_dir_all(&dst).expect("create destination");
+        fs::write(src.join(".gitignore"), b"target/\n*.log\n").expect("write gitignore");
+        fs::write(src.join("main.rs"), b"fn main() {}").expect("write source file");
+        fs::write(src.join("debug.log"), b"noise").expect("write log");
+        fs::write(src.join("target").join("artifact.bin"), b"junk").expect("write artifact");
+
+        let opts = CopyOpts {
+            source: src.clone(),
+            destination: dst.clone(),
+            cooldown_secs: 0,
+            no_manifest_on_card: true,
+            max_retries: 3,
+            unlimited_retries: false,
+            respect_gitignore: true,
+        };
+        super::run(&opts).expect("copy with gitignore filter");
+
+        let copied_root = dst.join("repo");
+        assert!(
+            copied_root.join("main.rs").is_file(),
+            "код должен копироваться"
+        );
+        assert!(
+            copied_root.join(".gitignore").is_file(),
+            "сам .gitignore копируется"
+        );
+        assert!(
+            !copied_root.join("debug.log").exists(),
+            "*.log должен быть исключён"
+        );
+        assert!(
+            !copied_root.join("target").exists(),
+            "target/ должен быть исключён"
+        );
+
+        // Без флага копируется всё.
+        let dst_full = tree.path().join("dst-full");
+        fs::create_dir_all(&dst_full).expect("create destination");
+        let opts_full = CopyOpts {
+            destination: dst_full.clone(),
+            respect_gitignore: false,
+            ..opts
+        };
+        super::run(&opts_full).expect("copy without gitignore filter");
+        assert!(dst_full.join("repo").join("debug.log").is_file());
+        assert!(dst_full
+            .join("repo")
+            .join("target")
+            .join("artifact.bin")
+            .is_file());
+    }
+
+    #[test]
+    fn overlapping_source_and_destination_rejected() {
+        init_state_dir();
+        let tree = TempTree::new("overlap");
+        let src = tree.path().join("data");
+        fs::create_dir_all(&src).expect("create source");
+        fs::write(src.join("f.txt"), b"x").expect("write source file");
+
+        // Назначение внутри источника.
+        let opts_inside = CopyOpts {
+            source: src.clone(),
+            destination: src.join("sub"),
+            cooldown_secs: 0,
+            no_manifest_on_card: true,
+            max_retries: 3,
+            unlimited_retries: false,
+            respect_gitignore: false,
+        };
+        let err = super::run(&opts_inside).expect_err("destination внутри source");
+        assert!(err.to_string().contains("внутри source"), "было: {err}");
+
+        // Копирование папки в её собственного родителя — цель совпала бы с источником.
+        let opts_parent = CopyOpts {
+            destination: tree.path().to_path_buf(),
+            ..opts_inside
+        };
+        let err = super::run(&opts_parent).expect_err("копирование поверх самого себя");
+        assert!(
+            err.to_string().contains("поверх самого себя"),
+            "было: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn newline_in_filename_rejected() {
+        init_state_dir();
+        let tree = TempTree::new("newline");
+        let src = tree.path().join("src");
+        let dst = tree.path().join("dst");
+        fs::create_dir_all(&src).expect("create source");
+        fs::create_dir_all(&dst).expect("create destination");
+        fs::write(src.join("bad\nname.txt"), b"data").expect("write source file");
+
+        let opts = CopyOpts {
+            source: src,
+            destination: dst,
+            cooldown_secs: 0,
+            no_manifest_on_card: true,
+            max_retries: 3,
+            unlimited_retries: false,
+            respect_gitignore: false,
+        };
+        let err = super::run(&opts).expect_err("имя с переносом строки должно отвергаться");
+        assert!(err.to_string().contains("перенос строки"), "было: {err}");
+    }
+
+    #[test]
+    fn checkpoint_resumes_without_card_manifest() {
+        init_state_dir();
+        let tree = TempTree::new("checkpoint");
+        let src = tree.path().join("src");
+        let dst = tree.path().join("dst");
+        fs::create_dir_all(&src).expect("create source");
+        fs::create_dir_all(&dst).expect("create destination");
+        fs::write(src.join("payload.txt"), b"checkpoint payload").expect("write source file");
+
+        let opts = CopyOpts {
+            source: src.clone(),
+            destination: dst.clone(),
+            cooldown_secs: 0,
+            no_manifest_on_card: true,
+            max_retries: 3,
+            unlimited_retries: false,
+            respect_gitignore: false,
+        };
+        super::run(&opts).expect("initial copy");
+
+        // Манифеста на карте нет, но checkpoint сохранён локально.
+        assert!(!dst.join(MANIFEST_FILENAME).exists());
+        let checkpoint = state::checkpoint_path(
+            &src.canonicalize().expect("canonicalize src"),
+            &dst.canonicalize().expect("canonicalize dst"),
+        )
+        .expect("checkpoint path");
+        assert!(checkpoint.is_file(), "checkpoint должен быть сохранён");
+
+        // Повреждённый файл на карте восстанавливается при повторном запуске.
+        let copied = dst.join("src").join("payload.txt");
+        fs::write(&copied, b"corrupted").expect("corrupt destination");
+        super::run(&opts).expect("resume via checkpoint");
+        let repaired = fs::read_to_string(&copied).expect("read repaired");
+        assert_eq!(repaired, "checkpoint payload");
     }
 }

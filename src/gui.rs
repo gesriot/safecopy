@@ -6,7 +6,7 @@ use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, RichTex
 
 use crate::cli::{CopyOpts, VerifyOpts};
 use crate::progress::{LogLevel, ProgressEvent, ProgressPhase, ProgressReporter};
-use crate::{copy, verify};
+use crate::{copy, state, verify};
 
 pub fn run() -> anyhow::Result<()> {
     let options = eframe::NativeOptions {
@@ -76,6 +76,7 @@ pub struct SafeCopyApp {
     max_retries: u32,
     unlimited_retries: bool,
     no_manifest_on_card: bool,
+    respect_gitignore: bool,
     current_file: String,
     total_bytes: u64,
     completed_bytes: u64,
@@ -85,20 +86,29 @@ pub struct SafeCopyApp {
 
 impl Default for SafeCopyApp {
     fn default() -> Self {
+        let settings = state::load_settings();
         Self {
             state: AppState::Idle,
             source_dir: None,
             dest_dir: None,
-            cooldown_secs: 45,
-            max_retries: 3,
-            unlimited_retries: false,
-            no_manifest_on_card: false,
+            // Значения из файла настроек прижимаем к диапазонам слайдеров.
+            cooldown_secs: settings.cooldown_secs.min(120),
+            max_retries: settings.max_retries.clamp(1, 10),
+            unlimited_retries: settings.unlimited_retries,
+            no_manifest_on_card: settings.no_manifest_on_card,
+            respect_gitignore: settings.respect_gitignore,
             current_file: String::new(),
             total_bytes: 0,
             completed_bytes: 0,
             logs: Vec::new(),
             rx: None,
         }
+    }
+}
+
+impl Drop for SafeCopyApp {
+    fn drop(&mut self) {
+        self.persist_settings();
     }
 }
 
@@ -234,6 +244,10 @@ impl SafeCopyApp {
                     "Копировать до победного (пока не получится или не кончится память)",
                 );
                 ui.checkbox(&mut self.no_manifest_on_card, "Без манифеста на карте");
+                ui.checkbox(
+                    &mut self.respect_gitignore,
+                    "Не копировать файлы, игнорируемые по .gitignore",
+                );
             });
     }
 
@@ -313,6 +327,7 @@ impl SafeCopyApp {
         };
 
         self.prepare_run(AppState::Preparing);
+        self.persist_settings();
         let opts = CopyOpts {
             source,
             destination,
@@ -320,6 +335,7 @@ impl SafeCopyApp {
             no_manifest_on_card: self.no_manifest_on_card,
             max_retries: self.max_retries,
             unlimited_retries: self.unlimited_retries,
+            respect_gitignore: self.respect_gitignore,
         };
         self.spawn_worker(ctx, move |reporter| {
             copy::run_with_reporter(&opts, reporter)
@@ -352,6 +368,16 @@ impl SafeCopyApp {
             let result = run(&reporter).map_err(|e| e.to_string());
             let _ = done_tx.send(GuiMessage::Done(result));
             done_ctx.request_repaint();
+        });
+    }
+
+    fn persist_settings(&self) {
+        state::save_settings(&state::Settings {
+            cooldown_secs: self.cooldown_secs,
+            max_retries: self.max_retries,
+            unlimited_retries: self.unlimited_retries,
+            no_manifest_on_card: self.no_manifest_on_card,
+            respect_gitignore: self.respect_gitignore,
         });
     }
 

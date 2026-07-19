@@ -32,8 +32,15 @@ pub struct CopyOpts {
     /// Сколько секунд ждать перед финальной cold-read верификацией
     #[arg(long, default_value_t = 45)]
     pub cooldown_secs: u64,
-    /// Не записывать manifest.xxh3 на карту
-    #[arg(long)]
+    /// Не записывать manifest.xxh3 на карту.
+    /// Включено по умолчанию; вернуть манифест: --no-manifest-on-card=false
+    #[arg(
+        long,
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub no_manifest_on_card: bool,
     /// Максимум попыток копирования одного файла
     #[arg(long, default_value_t = 3)]
@@ -41,8 +48,18 @@ pub struct CopyOpts {
     /// Не ограничивать число попыток для transient-ошибок записи/верификации:
     /// копировать, пока файл не запишется корректно или пока не кончится место.
     /// Неудачные .tmp остаются на карте — FS выдаёт следующей попытке другие сектора.
-    #[arg(long)]
+    /// Включено по умолчанию; ограничить попытки: --unlimited-retries=false
+    #[arg(
+        long,
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub unlimited_retries: bool,
+    /// Не копировать файлы, игнорируемые по правилам .gitignore внутри источника
+    #[arg(long)]
+    pub respect_gitignore: bool,
 }
 
 #[derive(Args, Debug)]

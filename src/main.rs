@@ -10,6 +10,7 @@ mod manifest;
 mod progress;
 mod quarantine;
 mod sanity;
+mod state;
 mod timestamps;
 mod verify;
 
