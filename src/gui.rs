@@ -365,7 +365,7 @@ impl SafeCopyApp {
         let done_ctx = ctx.clone();
         thread::spawn(move || {
             let reporter = GuiReporter { tx, ctx };
-            let result = run(&reporter).map_err(|e| e.to_string());
+            let result = run(&reporter).map_err(|e| format!("{e:#}"));
             let _ = done_tx.send(GuiMessage::Done(result));
             done_ctx.request_repaint();
         });

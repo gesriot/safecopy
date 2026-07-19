@@ -170,6 +170,21 @@ The script creates:
 
 It uses `macos/icon.PNG` as the source artwork, generates the rounded runtime icon used by egui in the Dock, writes the `.icns` bundle icon, and verifies the DMG with `hdiutil`.
 
+### Windows packaging
+
+Run the PowerShell packaging script from Windows. It requires Python with
+Pillow and `rc.exe` from the Windows SDK:
+
+```powershell
+.\scripts\package-windows.ps1
+```
+
+The script converts `macos/icon-runtime.png` to a multi-size `.ico`, embeds it
+into the release executable through a Windows resource, and creates:
+
+- `dist/windows/SaveCopy.exe`
+- `dist/SaveCopy-windows.zip`
+
 ## License
 
 MIT – see [LICENSE](LICENSE).

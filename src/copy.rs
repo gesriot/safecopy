@@ -79,7 +79,7 @@ pub fn run_with_reporter(opts: &CopyOpts, reporter: &dyn ProgressReporter) -> an
         format!("Сканирование {}...", source.display()),
     );
     println!("Сканирование {}…", source.display());
-    let entries = scan_source(&source, opts.respect_gitignore)?;
+    let entries = scan_source(&source, opts.respect_gitignore, reporter)?;
     check_filenames(&entries)?;
     if !opts.no_manifest_on_card {
         check_manifest_name_conflict(&entries)?;
@@ -495,7 +495,11 @@ fn print_summary(outcome: &CopyOutcome) {
     }
 }
 
-fn scan_source(source: &Path, respect_gitignore: bool) -> anyhow::Result<Vec<FileEntry>> {
+fn scan_source(
+    source: &Path,
+    respect_gitignore: bool,
+    reporter: &dyn ProgressReporter,
+) -> anyhow::Result<Vec<FileEntry>> {
     if source.is_file() {
         let relative = PathBuf::from(source.file_name().context("у source-файла нет имени")?);
         let size = source.metadata().context("metadata")?.len();
@@ -527,8 +531,21 @@ fn scan_source(source: &Path, respect_gitignore: bool) -> anyhow::Result<Vec<Fil
         .sort_by_file_name(std::cmp::Ord::cmp);
 
     let mut entries = Vec::new();
-    for entry in walker.build() {
-        let entry = entry.context("ошибка обхода source")?;
+    for result in walker.build() {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(error) if walk_error_is_not_found(&error) => {
+                report_log(
+                    reporter,
+                    LogLevel::Warning,
+                    format!("Путь исчез во время сканирования и был пропущен: {error}"),
+                );
+                continue;
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context("ошибка обхода source"));
+            }
+        };
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
@@ -546,6 +563,12 @@ fn scan_source(source: &Path, respect_gitignore: bool) -> anyhow::Result<Vec<Fil
         });
     }
     Ok(entries)
+}
+
+fn walk_error_is_not_found(error: &ignore::Error) -> bool {
+    error
+        .io_error()
+        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound)
 }
 
 /// Манифест и checkpoint — построчные форматы: перенос строки в имени файла
@@ -1250,6 +1273,30 @@ mod tests {
             .join("target")
             .join("artifact.bin")
             .is_file());
+    }
+
+    #[test]
+    fn missing_walk_entry_is_treated_as_a_scan_race() {
+        let missing = ignore::Error::WithPath {
+            path: PathBuf::from("temporary-file"),
+            err: Box::new(ignore::Error::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "entry disappeared",
+            ))),
+        };
+        let denied = ignore::Error::Io(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "access denied",
+        ));
+
+        assert!(
+            walk_error_is_not_found(&missing),
+            "исчезнувший во время обхода путь можно безопасно пропустить"
+        );
+        assert!(
+            !walk_error_is_not_found(&denied),
+            "ошибки доступа должны оставаться фатальными"
+        );
     }
 
     #[test]
