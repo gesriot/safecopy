@@ -190,7 +190,7 @@ fn draw_drop_zone(ui: &mut Ui, ctx: &Context, folder: Option<&PathBuf>, state: &
 
     Frame::new()
         .fill(bg_color)
-        .stroke(Stroke::new(1.5, border_color))
+        .stroke(Stroke::new(1.5_f32, border_color))
         .inner_margin(16.0)
         .corner_radius(6.0)
         .show(ui, |ui| {

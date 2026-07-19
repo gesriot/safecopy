@@ -410,7 +410,7 @@ fn draw_path_field(ui: &mut egui::Ui, path: Option<&Path>) {
     egui::Frame::none()
         .fill(ui.visuals().extreme_bg_color)
         .stroke(Stroke::new(
-            1.0,
+            1.0_f32,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
         ))
         .rounding(egui::Rounding::same(4.0))
