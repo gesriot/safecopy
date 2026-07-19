@@ -6,6 +6,10 @@ BINARY_NAME="${BINARY_NAME:-safecopy}"
 BUNDLE_ID="${BUNDLE_ID:-com.safecopy.app}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -z "${BINARY_PATH+x}" ]]; then
+  (cd "$ROOT_DIR" && cargo build --release)
+fi
 BINARY_PATH="${BINARY_PATH:-$ROOT_DIR/target/release/$BINARY_NAME}"
 MACOS_DIR="$ROOT_DIR/macos"
 ICON_PNG="${ICON_PNG:-$MACOS_DIR/icon.PNG}"
