@@ -574,7 +574,9 @@ fn scan_source(
 /// Служебный «мусор» инструментов разработки, который не хочется тащить на карту
 /// независимо от .gitignore. Помимо точных имён — общие паттерны, покрывающие
 /// целые семейства: `.mypy_cache` / `.nuitka-cache` / `.cache`, `.build-venv`,
-/// `.pytest-tmp-parallel3` / `.pytest-tmp-rustpkg`, `pkg.egg-info` и т.п.
+/// `.pytest-tmp-parallel3` / `.pytest-tmp-rustpkg`, `pkg.egg-info`, а также
+/// каталоги сборки Cargo/CMake/Python (`target`, `build`, `dist`) и Nuitka
+/// (`app.exe.build`, `app.dist`) и т.п.
 fn is_junk_entry(entry: &ignore::DirEntry) -> bool {
     let Some(name) = entry.file_name().to_str() else {
         return false;
@@ -595,6 +597,8 @@ fn is_junk_dir_name(name: &str) -> bool {
         "__pycache__",
         "node_modules",
         "dist",
+        "build",
+        "target",
         ".venv",
         "venv",
         ".tox",
@@ -606,6 +610,9 @@ fn is_junk_dir_name(name: &str) -> bool {
         || name.ends_with("-venv")
         || name.starts_with(".pytest-tmp")
         || name.ends_with(".egg-info")
+        // Nuitka: `app.exe.build/`, `app.dist/`, `app.onefile-build/`.
+        || name.ends_with(".build")
+        || name.ends_with(".dist")
 }
 
 fn is_junk_file_name(name: &str) -> bool {
@@ -1341,6 +1348,10 @@ mod tests {
             ".nuitka-cache",
             ".pytest-tmp-parallel3",
             "dist",
+            "build",
+            "target",
+            "bkw.exe.build",
+            "bkw.dist",
             "src",
         ] {
             fs::create_dir_all(src.join(dir)).expect("create source dir");
@@ -1377,6 +1388,10 @@ mod tests {
             ".nuitka-cache",
             ".pytest-tmp-parallel3",
             "dist",
+            "build",
+            "target",
+            "bkw.exe.build",
+            "bkw.dist",
         ] {
             assert!(
                 !copied_root.join(dir).exists(),
