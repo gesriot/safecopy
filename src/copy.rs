@@ -611,8 +611,7 @@ fn is_junk_dir_name(name: &str) -> bool {
         || name.starts_with(".pytest-tmp")
         || name.ends_with(".egg-info")
         // Nuitka: `app.exe.build/`, `app.dist/`, `app.onefile-build/`.
-        || name.ends_with(".build")
-        || name.ends_with(".dist")
+        || matches!(name.rsplit_once('.'), Some((_, "build" | "dist")))
 }
 
 fn is_junk_file_name(name: &str) -> bool {
