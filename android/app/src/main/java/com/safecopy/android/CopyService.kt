@@ -79,6 +79,8 @@ class CopyService : Service() {
                 maxRetries = intent.getIntExtra(EXTRA_MAX_RETRIES, 3),
                 unlimitedRetries = intent.getBooleanExtra(EXTRA_UNLIMITED, true),
                 noManifestOnDrive = intent.getBooleanExtra(EXTRA_NO_MANIFEST, true),
+                respectGitignore = intent.getBooleanExtra(EXTRA_RESPECT_GITIGNORE, false),
+                skipJunk = intent.getBooleanExtra(EXTRA_SKIP_JUNK, false),
             )
             val engine = SafeCopyEngine(
                 context = this,
@@ -281,6 +283,8 @@ class CopyService : Service() {
         const val EXTRA_MAX_RETRIES = "max_retries"
         const val EXTRA_UNLIMITED = "unlimited"
         const val EXTRA_NO_MANIFEST = "no_manifest"
+        const val EXTRA_RESPECT_GITIGNORE = "respect_gitignore"
+        const val EXTRA_SKIP_JUNK = "skip_junk"
 
         private const val CHANNEL_ID = "safecopy_jobs"
         private const val NOTIFICATION_ID = 7104

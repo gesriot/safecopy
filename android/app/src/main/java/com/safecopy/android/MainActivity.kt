@@ -48,6 +48,8 @@ class MainActivity : Activity() {
     private lateinit var cancelButton: Button
     private lateinit var unlimitedSwitch: Switch
     private lateinit var noManifestSwitch: Switch
+    private lateinit var respectGitignoreSwitch: Switch
+    private lateinit var skipJunkSwitch: Switch
     private lateinit var cooldownSeek: SeekBar
     private lateinit var cooldownValue: TextView
     private lateinit var retriesSeek: SeekBar
@@ -222,6 +224,30 @@ class MainActivity : Activity() {
                 }
             }
             body.addView(noManifestSwitch, ViewGroup.LayoutParams(MATCH, WRAP))
+
+            respectGitignoreSwitch = Switch(this).apply {
+                text = "Не копировать файлы, игнорируемые по .gitignore"
+                textSize = 15f
+                isChecked = preferences.getBoolean(KEY_RESPECT_GITIGNORE, false)
+                thumbTintList = ColorStateList.valueOf(COLOR_ACCENT)
+                trackTintList = ColorStateList.valueOf(0x66D71920)
+                setOnCheckedChangeListener { _, checked ->
+                    preferences.edit().putBoolean(KEY_RESPECT_GITIGNORE, checked).apply()
+                }
+            }
+            body.addView(respectGitignoreSwitch, ViewGroup.LayoutParams(MATCH, WRAP))
+
+            skipJunkSwitch = Switch(this).apply {
+                text = "Не копировать кэши и служебные папки (build, target, node_modules…)"
+                textSize = 15f
+                isChecked = preferences.getBoolean(KEY_SKIP_JUNK, false)
+                thumbTintList = ColorStateList.valueOf(COLOR_ACCENT)
+                trackTintList = ColorStateList.valueOf(0x66D71920)
+                setOnCheckedChangeListener { _, checked ->
+                    preferences.edit().putBoolean(KEY_SKIP_JUNK, checked).apply()
+                }
+            }
+            body.addView(skipJunkSwitch, ViewGroup.LayoutParams(MATCH, WRAP))
 
             cooldownValue = text("Пауза перед проверкой: 45 сек", 14, COLOR_INK)
             body.addView(cooldownValue, margins(top = 12))
@@ -528,6 +554,8 @@ class MainActivity : Activity() {
             putExtra(CopyService.EXTRA_MAX_RETRIES, retriesSeek.progress + 1)
             putExtra(CopyService.EXTRA_UNLIMITED, unlimitedSwitch.isChecked)
             putExtra(CopyService.EXTRA_NO_MANIFEST, noManifestSwitch.isChecked)
+            putExtra(CopyService.EXTRA_RESPECT_GITIGNORE, respectGitignoreSwitch.isChecked)
+            putExtra(CopyService.EXTRA_SKIP_JUNK, skipJunkSwitch.isChecked)
         }
         startForegroundService(intent)
     }
@@ -678,6 +706,8 @@ class MainActivity : Activity() {
         fromUsbButton.isEnabled = !state.busy
         unlimitedSwitch.isEnabled = !state.busy
         noManifestSwitch.isEnabled = !state.busy
+        respectGitignoreSwitch.isEnabled = !state.busy
+        skipJunkSwitch.isEnabled = !state.busy
         cooldownSeek.isEnabled = !state.busy
         retriesSeek.isEnabled = !state.busy && !unlimitedSwitch.isChecked
         val verificationVolumeKey = if (direction == Direction.TO_USB) {
@@ -838,6 +868,8 @@ class MainActivity : Activity() {
         private const val KEY_LAST_REVERSE_VOLUME = "last_reverse_volume"
         private const val KEY_UNLIMITED = "unlimited_retries"
         private const val KEY_NO_MANIFEST = "no_manifest"
+        private const val KEY_RESPECT_GITIGNORE = "respect_gitignore"
+        private const val KEY_SKIP_JUNK = "skip_junk"
         private const val KEY_COOLDOWN = "cooldown"
         private const val KEY_MAX_RETRIES = "max_retries"
         private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT

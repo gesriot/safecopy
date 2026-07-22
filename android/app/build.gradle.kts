@@ -36,8 +36,8 @@ android {
         applicationId = "com.safecopy.android"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 4
+        versionName = "1.2.0"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -81,6 +81,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
 }
 
 if (armHost) {

@@ -1,18 +1,38 @@
 # macOS / Windows
 .DS_Store
+._*
 Thumbs.db
+desktop.ini
 
 # Rust (Windows/macOS/Linux builds)
 target/
 dist/
 
-# Claude Code
-.claude/settings.local.json
+# Android / Gradle build state
+/android/.gradle/
+/android/.kotlin/
+/android/.idea/
+/android/**/build/
+/android/**/.cxx/
+/android/**/.externalNativeBuild/
+/android/**/captures/
+/android/app/release/
 
-# Android
-.gradle/
-build/
-local.properties
-keystore.properties
-signing/
+# Android machine-local configuration and signing secrets
+/android/local.properties
+/android/keystore.properties
+/android/key.properties
+/android/signing/
 *.jks
+*.keystore
+
+# Generated native libraries and install/build artifacts
+/android/app/src/main/jniLibs/
+/android/**/*.apk
+/android/**/*.aab
+/android/**/*.ap_
+/android/**/*.idsig
+*.iml
+
+# Release APK is published as a GitHub Release asset, not committed to history
+/SafeCopy-Android-arm64.apk

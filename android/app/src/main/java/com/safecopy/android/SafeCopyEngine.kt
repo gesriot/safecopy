@@ -39,7 +39,19 @@ class SafeCopyEngine(
         runSanityCheck()
 
         emit(EngineEvent.Phase(JobPhase.PREPARING, "Сканирование источника"))
-        val entries = documents.scan(selection, ::checkCancelled)
+        if (settings.respectGitignore) {
+            emit(EngineEvent.Log("[INFO] Учитываются правила .gitignore внутри источника"))
+        }
+        if (settings.skipJunk) {
+            emit(EngineEvent.Log("[INFO] Кэши и служебные артефакты будут пропущены"))
+        }
+        val entries = documents.scan(
+            selection = selection,
+            respectGitignore = settings.respectGitignore,
+            skipJunk = settings.skipJunk,
+            onWarning = { warning -> emit(EngineEvent.Log("[WARN] $warning")) },
+            checkCancelled = ::checkCancelled,
+        )
         check(entries.isNotEmpty()) { "В выбранном источнике нет файлов" }
         checkReservedNames(entries)
         val totalBytes = entries.sumOf { it.size }

@@ -3,6 +3,9 @@ package com.safecopy.android
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.DocumentsContract
+import java.io.InputStreamReader
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
 
 class SafDocuments(private val resolver: ContentResolver) {
     data class Info(
@@ -165,7 +168,13 @@ class SafDocuments(private val resolver: ContentResolver) {
         return current
     }
 
-    fun scan(selection: SourceSelection, checkCancelled: () -> Unit): List<SourceEntry> {
+    fun scan(
+        selection: SourceSelection,
+        respectGitignore: Boolean,
+        skipJunk: Boolean,
+        onWarning: (String) -> Unit,
+        checkCancelled: () -> Unit,
+    ): List<SourceEntry> {
         if (!selection.isTree) {
             val item = info(selection.uri)
             check(!item.isDirectory) { "Вместо файла выбрана папка" }
@@ -175,7 +184,17 @@ class SafDocuments(private val resolver: ContentResolver) {
         val root = rootDocumentUri(selection.uri)
         val files = mutableListOf<SourceEntry>()
         val rootParts = if (selection.includeRoot) listOf(selection.displayName) else emptyList()
-        scanDirectory(root, rootParts, files, checkCancelled)
+        scanDirectory(
+            directory = root,
+            scanDirectoryParts = emptyList(),
+            outputDirectoryParts = rootParts,
+            rules = GitIgnoreRules(),
+            respectGitignore = respectGitignore,
+            skipJunk = skipJunk,
+            onWarning = onWarning,
+            output = files,
+            checkCancelled = checkCancelled,
+        )
         return files
     }
 
@@ -208,18 +227,68 @@ class SafDocuments(private val resolver: ContentResolver) {
 
     private fun scanDirectory(
         directory: Uri,
-        relativeDirectory: List<String>,
+        scanDirectoryParts: List<String>,
+        outputDirectoryParts: List<String>,
+        rules: GitIgnoreRules,
+        respectGitignore: Boolean,
+        skipJunk: Boolean,
+        onWarning: (String) -> Unit,
         output: MutableList<SourceEntry>,
         checkCancelled: () -> Unit,
     ) {
         checkCancelled()
-        for (child in children(directory)) {
+        val children = children(directory)
+        val effectiveRules = if (respectGitignore) {
+            val gitignore = children.firstOrNull { !it.isDirectory && it.name == ".gitignore" }
+            if (gitignore == null) rules else rules.withFile(
+                scanDirectoryParts,
+                readGitignore(gitignore.uri, scanDirectoryParts, onWarning),
+            )
+        } else {
+            rules
+        }
+
+        for (child in children) {
             checkCancelled()
-            val relative = relativeDirectory + child.name
+            val scanRelative = scanDirectoryParts + child.name
+            if (skipJunk && SourceFilters.isJunk(scanRelative, child.isDirectory)) continue
+            if (
+                respectGitignore &&
+                effectiveRules.isIgnored(scanRelative, child.isDirectory)
+            ) continue
+
+            val outputRelative = outputDirectoryParts + child.name
             if (child.isDirectory) {
-                scanDirectory(child.uri, relative, output, checkCancelled)
+                scanDirectory(
+                    directory = child.uri,
+                    scanDirectoryParts = scanRelative,
+                    outputDirectoryParts = outputRelative,
+                    rules = effectiveRules,
+                    respectGitignore = respectGitignore,
+                    skipJunk = skipJunk,
+                    onWarning = onWarning,
+                    output = output,
+                    checkCancelled = checkCancelled,
+                )
             } else {
-                output += child.toSourceEntry(relative)
+                output += child.toSourceEntry(outputRelative)
+            }
+        }
+    }
+
+    private fun readGitignore(
+        uri: Uri,
+        directoryParts: List<String>,
+        onWarning: (String) -> Unit,
+    ): List<String> {
+        val displayPath = (directoryParts + ".gitignore").joinToString("/")
+        return readGitignoreBestEffort(displayPath, onWarning) {
+            val input = resolver.openInputStream(uri) ?: error("провайдер не открыл файл")
+            val decoder = StandardCharsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+            input.use { stream ->
+                InputStreamReader(stream, decoder).buffered().use { it.readLines() }
             }
         }
     }

@@ -22,6 +22,8 @@ data class CopySettings(
     val maxRetries: Int = 3,
     val unlimitedRetries: Boolean = true,
     val noManifestOnDrive: Boolean = true,
+    val respectGitignore: Boolean = false,
+    val skipJunk: Boolean = false,
 )
 
 data class ManifestRecord(
